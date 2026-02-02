@@ -6,6 +6,7 @@ import torch
 import random
 
 
+
 class GodunovEuler3D:
     """
     3D Euler equations solver using Godunov's method with exact Riemann solver.
@@ -23,7 +24,7 @@ class GodunovEuler3D:
         y_domain=[0, 1],
         z_domain=[0, 1],
         cfl_coefficient=0.8,
-        gamma=1.4,
+        GAMMA=1.4,
         tol=1e-6,
         device=None
     ):
@@ -60,7 +61,7 @@ class GodunovEuler3D:
         
         # Physical constants
         self.cfl_coefficient = cfl_coefficient
-        self.gamma = gamma
+        self.GAMMA = GAMMA
         self.tol = tol
         
         # Device
@@ -74,68 +75,54 @@ class GodunovEuler3D:
     
     def compute_f_and_df(self, p, W_L, W_R):
         """
-        Compute f and df for the Riemann problem.
-        
-        Parameters:
-        -----------
-        p : torch.Tensor
-            Pressure guess, shape (...,)
-        W_L, W_R : torch.Tensor
-            Left and right primitive variables, shape (..., 5) - [rho, u, v, w, p]
-        
-        Returns:
-        --------
-        fl, d_fl, fr, d_fr : torch.Tensor
-            f and df values for left and right states
+        W_L, W_R: (..., 4) - [rho, u, v, p] primitive variables
+        p: (...,) - pressure guess
         """
         left_rho = W_L[..., 0]
         left_p = W_L[..., 4]
         right_rho = W_R[..., 0]
         right_p = W_R[..., 4]
         
-        Al = 2 / (self.gamma + 1) / left_rho
-        Ar = 2 / (self.gamma + 1) / right_rho
-        Bl = (self.gamma - 1) / (self.gamma + 1) * left_p
-        Br = (self.gamma - 1) / (self.gamma + 1) * right_p
-        al = torch.sqrt(self.gamma * left_p / left_rho)
-        ar = torch.sqrt(self.gamma * right_p / right_rho)
+        Al = 2 / (self.GAMMA + 1) / left_rho
+        Ar = 2 / (self.GAMMA + 1) / right_rho
+        Bl = (self.GAMMA - 1) / (self.GAMMA + 1) * left_p
+        Br = (self.GAMMA - 1) / (self.GAMMA + 1) * right_p
+        al = torch.sqrt(self.GAMMA * left_p / left_rho)
+        ar = torch.sqrt(self.GAMMA * right_p / right_rho)
         
         left_shock_cell = p > left_p
         right_shock_cell = p > right_p
 
-        # left rarefaction wave
-        fl = 2 * al / (self.gamma - 1) * ((p/left_p)**((self.gamma - 1)/(2 * self.gamma)) - 1)
-        d_fl = 1 / left_rho / al * (p/left_p)**(-(self.gamma + 1)/(2 * self.gamma))
-  
-        # override left shock wave
+        #left rarefaction wave
+        fl = 2 * al / (self.GAMMA - 1) * ((p/left_p)**((self.GAMMA - 1)/(2 * self.GAMMA)) - 1)
+        d_fl = 1 / left_rho / al * (p/left_p)**(-(self.GAMMA + 1)/(2 * self.GAMMA))
+    
+        #overide left shock wave
         fl[left_shock_cell] = ((p - left_p) * torch.sqrt(Al / (p + Bl)))[left_shock_cell]
         d_fl[left_shock_cell] = (torch.sqrt(Al / (Bl + p)) * (1 - 0.5 * (p - left_p) / (Bl + p)))[left_shock_cell]
 
-        # right rarefaction wave
-        fr = 2 * ar / (self.gamma - 1) * ((p/right_p)**((self.gamma - 1)/(2 * self.gamma)) - 1)
-        d_fr = 1 / right_rho / ar * (p/right_p)**(-(self.gamma + 1)/(2 * self.gamma))
+
+        #right rarefaction wave
+        fr = 2 * ar / (self.GAMMA - 1) * ((p/right_p)**((self.GAMMA - 1)/(2 * self.GAMMA)) - 1)
+        d_fr = 1 / right_rho / ar * (p/right_p)**(-(self.GAMMA + 1)/(2 * self.GAMMA))
         
-        # override right shock wave
-        fr[right_shock_cell] = ((p - right_p) * torch.sqrt(Ar / (p + Br)))[right_shock_cell]
+        #overide right shock wave
+        fr[right_shock_cell] = ((p - right_p)* torch.sqrt(Ar / (p + Br)))[right_shock_cell]
         d_fr[right_shock_cell] = (torch.sqrt(Ar / (Br + p)) * (1 - 0.5 * (p - right_p) / (Br + p)))[right_shock_cell]
 
         return fl, d_fl, fr, d_fr
     
     def solve_riemann_star_state(self, W_L, W_R, normal='x'):
         """
-        Solve the Riemann problem to find the star state.
+        Get the exact Riemann solution for the Euler equations.
+        Newton-Raphson iterative procedure
+
+        p(k)= p(k-1)- f(p(k-1)) / f'(p(k-1))
+
+        W_L, W_R: (..., 4) - [rho, u, v, p] primitive variables
+        normal: 'x' or 'y' - direction of the Riemann problem
         
-        Parameters:
-        -----------
-        W_L, W_R : torch.Tensor
-            Left and right primitive variables, shape (..., 5) - [rho, u, v, w, p]
-        normal : str
-            Direction of the Riemann problem ('x', 'y', or 'z')
-        
-        Returns:
-        --------
-        p, u, rho_l_star, rho_r_star : torch.Tensor
-            Star state pressure, velocity, and densities
+        return value: p*, u* (or v*), rho*l, rho*r
         """
         # Extract variables from state
         left_rho = W_L[..., 0]
@@ -154,58 +141,52 @@ class GodunovEuler3D:
             left_u = W_L[..., 3]  # w component
             right_u = W_R[..., 3]
         else:
-            raise ValueError("normal must be 'x', 'y' or 'z'")
+            raise ValueError("normal must be 'x' or 'y' or 'z'")
 
         # Initial guess for the pressure
+        # Should be optimaized using Two–Rarefaction approximation, primitive variables, Two–Shock approximation.
         p = 0.5 * (left_p + right_p)
         count = 0
-        while True:
+        while(True):
             count += 1
             prev_p = p
             fl, d_fl, fr, d_fr = self.compute_f_and_df(p, W_L, W_R)
 
-            f = fl + fr + right_u - left_u
+            f = fl + fr  + right_u - left_u
             df = d_fl + d_fr
 
             p = p - f / df
-            # 음압 방지
+            #음압 방지.
             p = torch.clamp(p, min=torch.tensor(1e-12, device=p.device))
-            # 모든 셀에서 충족하면 종료
-            if torch.all(2 * abs(p - prev_p) < self.tol_tensor * (p + prev_p)) or count > 1000:
+            #모든 셀에서 충족하면 종료.
+            tol_tensor = torch.tensor(self.tol, device=p.device)
+            if(torch.all(2 * abs(p - prev_p) < tol_tensor * (p + prev_p)) or count > 1000):
                 break
-    
+        
         fl, d_fl, fr, d_fr = self.compute_f_and_df(p, W_L, W_R)
         u = 0.5 * (left_u + right_u + fr - fl)
 
         left_shock_cell = p > left_p
         right_shock_cell = p > right_p
 
-        rho_l_star = left_rho * (p / left_p) ** (1 / self.gamma)
-        rho_l_star[left_shock_cell] = (left_rho * (self.gamma * (p + left_p) - left_p + p) /
-                                      (self.gamma * (p + left_p) - p + left_p))[left_shock_cell]
+        rho_l_star = left_rho * (p / left_p) ** (1 / self.GAMMA)
+        rho_l_star[left_shock_cell] = (left_rho * (self.GAMMA * (p + left_p) - left_p + p) /
+                                    (self.GAMMA * (p + left_p) - p + left_p))[left_shock_cell]
 
-        rho_r_star = right_rho * (p / right_p) ** (1 / self.gamma)
-        rho_r_star[right_shock_cell] = (right_rho * (self.gamma * (p + right_p) - right_p + p) /
-                                      (self.gamma * (p + right_p) - p + right_p))[right_shock_cell]
+        rho_r_star = right_rho * (p / right_p) ** (1 / self.GAMMA)
+        rho_r_star[right_shock_cell] = (right_rho * (self.GAMMA * (p + right_p) - right_p + p) /
+                                    (self.GAMMA * (p + right_p) - p + right_p))[right_shock_cell]
 
         return p, u, rho_l_star, rho_r_star
-    
+
     def riemann_flux(self, W_L, W_R, normal='x'):
         """
         Solve local Riemann problem at s = 0 for all interfaces along one direction.
         Returns the flux at the interface.
         
-        Parameters:
-        -----------
-        W_L, W_R : torch.Tensor
-            Left and right primitive variables, shape (..., 5) - [rho, u, v, w, p]
-        normal : str
-            Direction of the Riemann problem ('x', 'y', or 'z')
-        
-        Returns:
-        --------
-        flux : torch.Tensor
-            Flux at the interface, shape (..., 5)
+        W_L, W_R: (..., 4) - [rho, u, v, p] primitive variables
+        normal: 'x' or 'y' - direction of the Riemann problem
+        Returns: (..., 4) - flux at the interface
         """
         # Extract variables from state
         left_rho = W_L[..., 0]
@@ -219,22 +200,22 @@ class GodunovEuler3D:
             right_u = W_R[..., 1]
             left_v = W_L[..., 2]  # v component (perpendicular)
             right_v = W_R[..., 2]
-            left_w = W_L[..., 3]  # w component
+            left_w = W_L[..., 3]  # w component (perpendicular)
             right_w = W_R[..., 3]
         elif normal == 'y':
             left_u = W_L[..., 2]  # v component
             right_u = W_R[..., 2]
             left_v = W_L[..., 1]  # u component (perpendicular)
             right_v = W_R[..., 1]
-            left_w = W_L[..., 3]  # w component
+            left_w = W_L[..., 3]  # w component (perpendicular)
             right_w = W_R[..., 3]
         elif normal == 'z':
             left_u = W_L[..., 3]  # w component
             right_u = W_R[..., 3]
-            left_v = W_L[..., 1]  # u component
-            right_v = W_R[..., 1]
-            left_w = W_L[..., 2]  # v component
-            right_w = W_R[..., 2]
+            left_v = W_L[..., 2]  # v component (perpendicular)
+            right_v = W_R[..., 2]
+            left_w = W_L[..., 1]  # u component (perpendicular)
+            right_w = W_R[..., 1]
         else:
             raise ValueError("normal must be 'x', 'y' or 'z'")
         
@@ -263,7 +244,7 @@ class GodunovEuler3D:
 
         # -------- Left rarefaction --------
         if torch.any(left_contact & left_rarefaction):
-            al = torch.sqrt(self.gamma * left_p / left_rho)
+            al = torch.sqrt(self.GAMMA * left_p / left_rho)
             s_hl = left_u - al
 
             # Region 1: left state
@@ -274,7 +255,7 @@ class GodunovEuler3D:
                 p[mask_l1] = left_p[mask_l1]
 
             # Region 2: star left
-            al_star = al * (p_star / left_p) ** ((self.gamma - 1) / (2 * self.gamma))
+            al_star = al * (p_star / left_p) ** ((self.GAMMA - 1) / (2 * self.GAMMA))
             s_tl = u_star - al_star
             mask_l2 = left_contact & left_rarefaction & (s > s_tl)
             if torch.any(mask_l2):
@@ -285,14 +266,14 @@ class GodunovEuler3D:
             # Region 3: inside fan
             mask_l3 = left_contact & left_rarefaction & ~(s < s_hl) & ~(s > s_tl)
             if torch.any(mask_l3):
-                p[mask_l3] = left_p[mask_l3] * ((2 * al[mask_l3] + (self.gamma - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.gamma + 1))) ** (2 * self.gamma / (self.gamma - 1))
-                u[mask_l3] = 2 / (self.gamma + 1) * (al[mask_l3] + (self.gamma - 1) / 2 * left_u[mask_l3] + s[mask_l3])
-                rho[mask_l3] = left_rho[mask_l3] * ((2 * al[mask_l3] + (self.gamma - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.gamma + 1))) ** (2 / (self.gamma - 1))
+                p[mask_l3] = left_p[mask_l3] * ((2 * al[mask_l3] + (self.GAMMA - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.GAMMA + 1))) ** (2 * self.GAMMA / (self.GAMMA - 1))
+                u[mask_l3] = 2 / (self.GAMMA + 1) * (al[mask_l3] + (self.GAMMA - 1) / 2 * left_u[mask_l3] + s[mask_l3])
+                rho[mask_l3] = left_rho[mask_l3] * ((2 * al[mask_l3] + (self.GAMMA - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.GAMMA + 1))) ** (2 / (self.GAMMA - 1))
 
         # -------- Left shock --------
         if torch.any(left_contact & left_shock):
-            al = torch.sqrt(self.gamma * left_p / left_rho)
-            s_l = left_u - al * torch.sqrt((self.gamma * (p_star + left_p) + p_star - left_p) / (2 * self.gamma * left_p))
+            al = torch.sqrt(self.GAMMA * left_p / left_rho)
+            s_l = left_u - al * torch.sqrt((self.GAMMA * (p_star + left_p) + p_star - left_p) / (2 * self.GAMMA * left_p))
             mask_ls = left_contact & left_shock & (s < s_l)
             if torch.any(mask_ls):
                 rho[mask_ls] = left_rho[mask_ls]
@@ -307,7 +288,7 @@ class GodunovEuler3D:
 
         # -------- Right rarefaction --------
         if torch.any(right_contact & right_rarefaction):
-            ar = torch.sqrt(self.gamma * right_p / right_rho)
+            ar = torch.sqrt(self.GAMMA * right_p / right_rho)
             s_hr = right_u + ar
 
             # Region 1: right state
@@ -318,7 +299,7 @@ class GodunovEuler3D:
                 p[mask_r1] = right_p[mask_r1]
 
             # Region 2: star right
-            ar_star = ar * (p_star / right_p) ** ((self.gamma - 1) / (2 * self.gamma))
+            ar_star = ar * (p_star / right_p) ** ((self.GAMMA - 1) / (2 * self.GAMMA))
             s_tr = u_star + ar_star
             mask_r2 = right_contact & right_rarefaction & (s < s_tr)
             if torch.any(mask_r2):
@@ -329,14 +310,14 @@ class GodunovEuler3D:
             # Region 3: inside fan
             mask_r3 = right_contact & right_rarefaction & ~(s > s_hr) & ~(s < s_tr)
             if torch.any(mask_r3):
-                p[mask_r3] = right_p[mask_r3] * ((2 * ar[mask_r3] + (self.gamma - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.gamma + 1))) ** (2 * self.gamma / (self.gamma - 1))
-                u[mask_r3] = 2 / (self.gamma + 1) * (-ar[mask_r3] + (self.gamma - 1) / 2 * right_u[mask_r3] + s[mask_r3])
-                rho[mask_r3] = right_rho[mask_r3] * ((2 * ar[mask_r3] + (self.gamma - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.gamma + 1))) ** (2 / (self.gamma - 1))
+                p[mask_r3] = right_p[mask_r3] * ((2 * ar[mask_r3] + (self.GAMMA - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.GAMMA + 1))) ** (2 * self.GAMMA / (self.GAMMA - 1))
+                u[mask_r3] = 2 / (self.GAMMA + 1) * (-ar[mask_r3] + (self.GAMMA - 1) / 2 * right_u[mask_r3] + s[mask_r3])
+                rho[mask_r3] = right_rho[mask_r3] * ((2 * ar[mask_r3] + (self.GAMMA - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.GAMMA + 1))) ** (2 / (self.GAMMA - 1))
 
         # -------- Right shock --------
         if torch.any(right_contact & right_shock):
-            ar = torch.sqrt(self.gamma * right_p / right_rho)
-            s_r = right_u + ar * torch.sqrt((self.gamma * (p_star + right_p) + p_star - right_p) / (2 * self.gamma * right_p))
+            ar = torch.sqrt(self.GAMMA * right_p / right_rho)
+            s_r = right_u + ar * torch.sqrt((self.GAMMA * (p_star + right_p) + p_star - right_p) / (2 * self.GAMMA * right_p))
             mask_rs = right_contact & right_shock & (s > s_r)
             if torch.any(mask_rs):
                 rho[mask_rs] = right_rho[mask_rs]
@@ -356,7 +337,7 @@ class GodunovEuler3D:
         w = torch.zeros_like(left_w)
         w[left_contact] = left_w[left_contact]
         w[right_contact] = right_w[right_contact]
-        E = p / (self.gamma - 1) + 0.5 * rho * (u**2 + v**2 + w**2)
+        E = p / (self.GAMMA - 1) + 0.5 * rho * (u**2 + v**2 + w**2)
         
         flux = torch.zeros((*shape, 5), device=rho.device)
         flux[..., 0] = rho * u                    # F_rho
@@ -367,12 +348,12 @@ class GodunovEuler3D:
             flux[..., 2] = rho * u * v                # F_rhov
             flux[..., 3] = rho * u * w                # F_rhow
         elif normal == 'y':  
-            flux[..., 1] = rho * v * u                # G_rhou  
+            flux[..., 1] = rho * u * v               # G_rhou  
             flux[..., 2] = rho * u**2 + p             # G_rhov (u is v in y-direction)
-            flux[..., 3] = rho * u * w                # G_rhow
+            flux[..., 3] = rho * w * u             # G_rhow
         else:
             flux[..., 1] = rho * w * u                # G_rhou
-            flux[..., 2] = rho * u * w                # G_rhov
+            flux[..., 2] = rho * v * u                # G_rhov
             flux[..., 3] = rho * u**2 + p             # G_rhow
 
         return flux
@@ -396,7 +377,7 @@ class GodunovEuler3D:
         v = W[..., 2]
         w = W[..., 3]
         p = W[..., 4]
-        E = p / (self.gamma - 1) + 0.5 * rho * (u**2 + v**2 + w**2)
+        E = p / (self.GAMMA - 1) + 0.5 * rho * (u**2 + v**2 + w**2)
         return torch.stack([rho, u * rho, v * rho, w * rho, E], dim=-1)
     
     def U_to_W(self, U):
@@ -418,7 +399,7 @@ class GodunovEuler3D:
         v = U[..., 2] / rho
         w = U[..., 3] / rho
         E = U[..., 4]
-        p = (self.gamma - 1) * (E - 0.5 * rho * (u**2 + v**2 + w**2))
+        p = (self.GAMMA - 1) * (E - 0.5 * rho * (u**2 + v**2 + w**2))
         p = torch.clamp(p, min=1e-10)
         return torch.stack([rho, u, v, w, p], dim=-1)
     
@@ -436,7 +417,7 @@ class GodunovEuler3D:
         dt : float
             Time step
         """
-        a = torch.sqrt(self.gamma * CELL[:, :, :, 4] / CELL[:, :, :, 0])  # sound speed
+        a = torch.sqrt(self.GAMMA * CELL[:, :, :, 4] / CELL[:, :, :, 0])  # sound speed
         u = CELL[:, :, :, 1]  # x-velocity
         v = CELL[:, :, :, 2]  # y-velocity
         w = CELL[:, :, :, 3]  # z-velocity
@@ -578,8 +559,8 @@ class GodunovEuler3D:
         
         return CELL, dt
     
-    def create_explosion_initial_condition(self, diameter=0.2, rho_inner=1.0, p_inner=1.0, 
-                                          rho_outer=0.125, p_outer=0.1):
+    def create_explosion_initial_condition(self, rho_inner=1.0, p_inner=1.0, 
+                                          rho_outer=0.125, p_outer=0.1, sigma = 0.1):
         """
         Create explosion initial condition.
         
@@ -606,7 +587,6 @@ class GodunovEuler3D:
         center_x = (self.x_domain[0] + self.x_domain[1]) / 2
         center_y = (self.y_domain[0] + self.y_domain[1]) / 2
         center_z = (self.z_domain[0] + self.z_domain[1]) / 2
-        radius = diameter / 2  # 반경
 
         # 각 셀의 중심 좌표 계산 (ghost cell 제외한 실제 셀만)
         x_coords = torch.linspace(self.x_domain[0] + self.dx/2, self.x_domain[1] - self.dx/2, 
@@ -618,23 +598,17 @@ class GodunovEuler3D:
         X, Y, Z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='xy')
 
         # 중심으로부터의 거리 계산
-        distances = torch.sqrt((X - center_x)**2 + (Y - center_y)**2 + (Z - center_z)**2)
-
-        # 폭발 영역 (반경 내부): 고압, 고밀도
-        explosion_mask = distances < radius
+        distances2 = (X - center_x)**2 + (Y - center_y)**2 + (Z - center_z)**2
+        # === Smooth Gaussian Profile ===
+        # exp(-r²/(2σ²)) 형태
+        gaussian_profile = torch.exp(-distances2 / (2 * sigma**2))
 
         # 기본값 설정 (외부 영역) - ghost cell 포함 전체
-        CELL[:, :, :, 0] = rho_outer  # rho (low density)
-        CELL[:, :, :, 1] = 0.0        # u
-        CELL[:, :, :, 2] = 0.0        # v
-        CELL[:, :, :, 3] = 0.0        # w
+        CELL[:, :, :, 0] = rho_outer # rho (low density)
         CELL[:, :, :, 4] = p_outer    # p (low pressure)
 
         # 폭발 영역 설정 (고압, 고밀도) - 실제 셀만 (ghost cell 제외)
-        CELL[1:-1, 1:-1, 1:-1, 0][explosion_mask] = rho_inner   # rho (high density)
-        CELL[1:-1, 1:-1, 1:-1, 1][explosion_mask] = 0.0         # u
-        CELL[1:-1, 1:-1, 1:-1, 2][explosion_mask] = 0.0         # v
-        CELL[1:-1, 1:-1, 1:-1, 3][explosion_mask] = 0.0         # w
-        CELL[1:-1, 1:-1, 1:-1, 4][explosion_mask] = p_inner     # p (high pressure)
+        CELL[1:-1, 1:-1, 1:-1, 0] += (rho_inner - rho_outer) * gaussian_profile    # rho (high density)
+        CELL[1:-1, 1:-1, 1:-1, 4] += (p_inner - p_outer) * gaussian_profile     # p (high pressure)
 
         return CELL
