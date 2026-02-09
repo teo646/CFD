@@ -3,9 +3,22 @@
 """
 import numpy as np
 import torch
+import torch.nn.functional as F
 import random
 
+def generate_smooth_noise_fft(shape, k0=5.0, device=None):
+    nz, ny, nx = shape
+    kx = np.fft.fftfreq(nx)
+    ky = np.fft.fftfreq(ny)
+    kz = np.fft.fftfreq(nz)
+    KZ, KY, KX = np.meshgrid(kz, ky, kx, indexing='ij')
 
+    spectrum = np.random.randn(nz, ny, nx) + 1j*np.random.randn(nz, ny, nx)
+    spectrum *= np.exp(-(KX**2 + KY**2 + KZ**2) * k0**2)
+
+    noise = np.fft.ifftn(spectrum).real
+    noise /= np.std(noise)
+    return torch.from_numpy(noise).to(device)
 
 class GodunovEuler3D:
     """
@@ -428,7 +441,104 @@ class GodunovEuler3D:
         dt_y = self.cfl_coefficient * self.dy / v_max
         dt_z = self.cfl_coefficient * self.dz / w_max
         return torch.min(torch.min(dt_x, dt_y), dt_z)
-    
+
+    def muscl_reconstruction(self, CELL, dt, normal='x'):
+        """
+        Perform MUSCL-Hancock-type reconstruction (without TVD limiter).
+
+        Parameters
+        ----------
+        CELL : torch.Tensor
+            Cell-averaged primitive variables, shape (Nz+2, Ny+2, Nx+2, 5)
+            [rho, u, v, w, p]
+
+        dt : float
+            Time step
+
+        normal : str
+            'x' or 'y' or 'z'
+
+        Returns
+        -------
+        WL, WR : torch.Tensor
+            Reconstructed left/right states at interfaces along `normal`.
+
+            For normal='x': shape (Nz+2, Ny+2, Nx, 5)
+            For normal='y': shape (Nz+2, Ny, Nx+2, 5)
+            For normal='z': shape (Nz, Ny+2, Nx+2, 5)
+
+        Wil' = Wi - 0.5 * Di - 0.5 * dt / dx * A Di
+        WiR' = Wi + 0.5 * Di - 0.5 * dt / dx * A Di
+        
+        """
+        # -------- pick normal velocity component u_n --------
+        if normal == 'x':
+            Di = 0.5 * (CELL[:, :, 2:, :] - CELL[:, :, :-2, :])
+            Wi = CELL[:, :, 1:-1, :]  
+            dx = self.dx  
+        elif normal == 'y':
+            Di = 0.5 * (CELL[:, 2:, :, :] - CELL[:, :-2, :, :])
+            Wi = CELL[:, 1:-1, :, :]
+            dx = self.dy
+        elif normal == 'z':
+            Di = 0.5 * (CELL[2:, :, :, :] - CELL[:-2, :, :, :])
+            Wi = CELL[1:-1, :, :, :]
+            dx = self.dz
+        else:
+            raise ValueError("normal must be 'x' or 'y' or 'z'")
+
+        #calculate (A(Wi) + B(Wi) + C(Wi)) Di = K
+        rho = Wi[..., 0]
+        u = Wi[..., 1]
+        v = Wi[..., 2]
+        w = Wi[..., 3]
+        p = Wi[..., 4]
+
+        rho_x = Di[..., 0]
+        u_x = Di[..., 1]
+        v_x = Di[..., 2]
+        w_x = Di[..., 3]
+        p_x = Di[..., 4]
+
+        K = torch.zeros_like(Wi)
+
+        if(normal == 'x'):
+            K[..., 0] = u * rho_x + rho * u_x
+            K[..., 1] = u * u_x + p_x / rho
+            K[..., 2] = u * v_x
+            K[..., 3] = u * w_x
+            K[..., 4] = u * p_x + self.GAMMA * p * u_x
+        elif(normal == 'y'):
+            K[..., 0] = v * rho_x + rho * v_x
+            K[..., 1] = v * u_x
+            K[..., 2] = v * v_x + p_x / rho
+            K[..., 3] = v * w_x
+            K[..., 4] = v * p_x + self.GAMMA * p * v_x
+        elif(normal == 'z'):
+            K[..., 0] = w * rho_x + rho * w_x
+            K[..., 1] = w * u_x
+            K[..., 2] = w * v_x
+            K[..., 3] = w * w_x + p_x / rho
+            K[..., 4] = w * p_x + self.GAMMA * p * w_x
+        else:
+            raise ValueError("normal must be 'x' or 'y' or 'z'")
+
+        WL = Wi - 0.5 * Di - 0.5 * dt / dx * K
+        WR = Wi + 0.5 * Di - 0.5 * dt / dx * K
+
+        # WL and Wr are the left and right states at the cell.
+        # the function is returning the left and right states at the interface between the cell and the next cell.
+
+        if(normal == 'x'):
+            return WR[:, :, :-1, :], WL[:, :, 1:, :]
+        elif(normal == 'y'):
+            return WR[:, :-1, :, :], WL[:, 1:, :, :]
+        elif(normal == 'z'):
+            return WR[:-1, :, :, :], WL[1:, :, :, :]
+        else:
+            raise ValueError("normal must be 'x' or 'y' or 'z'")
+
+
     def sweep_x(self, CELL, dt):
         """
         Perform x-direction sweep.
@@ -446,19 +556,23 @@ class GodunovEuler3D:
             Updated cell data
         """
         # X-direction sweep: solve Riemann problems along x-direction for each y
-        flux_x = self.riemann_flux(CELL[:, :, :-1, :], CELL[:, :, 1:, :], normal='x')
+        WL, WR = self.muscl_reconstruction(CELL, dt, normal='x')
+        flux_x = self.riemann_flux(WL, WR, normal='x')
 
-        U_cell = self.W_to_U(CELL[:, :, 1:-1, :])
+        U_cell = self.W_to_U(CELL[:, :, 2:-2, :])
         
         # X-direction update
         U_new = U_cell + dt/self.dx * (flux_x[:, :, :-1, :] - flux_x[:, :, 1:, :])
         
         # Convert back to primitive
-        CELL[:, :, 1:-1, :] = self.U_to_W(U_new)
+        CELL[:, :, 2:-2, :] = self.U_to_W(U_new)
         
         # Apply boundary conditions in x-direction
-        CELL[:, :, 0, :] = CELL[:, :, 1, :]
-        CELL[:, :, -1, :] = CELL[:, :, -2, :]
+        CELL[:, :, 1, :] = CELL[:, :, 2, :]
+        CELL[:, :, 0, :] = CELL[:, :, 3, :]
+
+        CELL[:, :, -2, :] = CELL[:, :, -3, :]
+        CELL[:, :, -1, :] = CELL[:, :, -4, :]
 
         return CELL
     
@@ -479,20 +593,24 @@ class GodunovEuler3D:
             Updated cell data
         """
         # Y-direction sweep: solve Riemann problems along y-direction for each x
-        flux_y = self.riemann_flux(CELL[:, :-1, :, :], CELL[:, 1:, :, :], normal='y')
+        WL, WR = self.muscl_reconstruction(CELL, dt, normal='y')
+        flux_y = self.riemann_flux(WL, WR, normal='y')
         
         # Update in y-direction
-        U_cell = self.W_to_U(CELL[:, 1:-1, :, :])
+        U_cell = self.W_to_U(CELL[:, 2:-2, :, :])
         
         # Y-direction update
         U_new = U_cell + dt/self.dy * (flux_y[:, :-1, :, :] - flux_y[:, 1:, :, :])
         
         # Final update
-        CELL[:, 1:-1, :, :] = self.U_to_W(U_new)
+        CELL[:, 2:-2, :, :] = self.U_to_W(U_new)
         
         # Apply boundary conditions in y-direction
-        CELL[:, 0, :, :] = CELL[:, 1, :, :]
-        CELL[:, -1, :, :] = CELL[:, -2, :, :]
+        CELL[:, 1, :, :] = CELL[:, 2, :, :]
+        CELL[:, 0, :, :] = CELL[:, 3, :, :]
+
+        CELL[:, -2, :, :] = CELL[:, -3, :, :]
+        CELL[:, -1, :, :] = CELL[:, -4, :, :]
         
         return CELL
     
@@ -513,20 +631,24 @@ class GodunovEuler3D:
             Updated cell data
         """
         # Z-direction sweep: solve Riemann problems along z-direction for each x
-        flux_z = self.riemann_flux(CELL[:-1, :, :, :], CELL[1:, :, :, :], normal='z')
+        WL, WR = self.muscl_reconstruction(CELL, dt, normal='z')
+        flux_z = self.riemann_flux(WL, WR, normal='z')
         
         # Update in z-direction
-        U_cell = self.W_to_U(CELL[1:-1, :, :, :])
-        
+        U_cell = self.W_to_U(CELL[2:-2, :, :, :])
+                    
         # Z-direction update
         U_new = U_cell + dt/self.dz * (flux_z[:-1, :, :, :] - flux_z[1:, :, :, :])
         
         # Final update
-        CELL[1:-1, :, :, :] = self.U_to_W(U_new)
+        CELL[2:-2, :, :, :] = self.U_to_W(U_new)
         
         # Apply boundary conditions in z-direction
-        CELL[0, :, :, :] = CELL[1, :, :, :]
-        CELL[-1, :, :, :] = CELL[-2, :, :, :]
+        CELL[1, :, :, :] = CELL[2, :, :, :]
+        CELL[0, :, :, :] = CELL[3, :, :, :]
+
+        CELL[-2, :, :, :] = CELL[-3, :, :, :]
+        CELL[-1, :, :, :] = CELL[-4, :, :, :]
         
         return CELL
     
@@ -556,59 +678,126 @@ class GodunovEuler3D:
         CELL = sweep_order[2](CELL, dt)
         CELL = sweep_order[1](CELL, dt * 0.5)
         CELL = sweep_order[0](CELL, dt * 0.5)
-        
-        return CELL, dt
-    
-    def create_explosion_initial_condition(self, rho_inner=1.0, p_inner=1.0, 
-                                          rho_outer=0.125, p_outer=0.1, sigma = 0.1):
-        """
-        Create explosion initial condition.
-        
-        Parameters:
-        -----------
-        diameter : float
-            Diameter of the explosion region
-        rho_inner, p_inner : float
-            Density and pressure inside the explosion region
-        rho_outer, p_outer : float
-            Density and pressure outside the explosion region
-        
-        Returns:
-        --------
-        CELL : torch.Tensor
-            Initial cell data, shape (Nz+2, Ny+2, Nx+2, 5) - [rho, u, v, w, p]
-        """
-        # +2 for cell boundary (ghost cells)
-        # Shape: (Nz + 2, Ny + 2, Nx + 2, 5) - [rho, u, v, w, p]
-        CELL = torch.zeros((self.num_cells_z + 2, self.num_cells_y + 2, self.num_cells_x + 2, 5), 
-                          device=self.device)
 
-        # 중심 좌표 (도메인 중앙)
+        return CELL, dt
+
+    def create_explosion_initial_condition_complex(
+        self,
+        rho_inner=1.0,
+        p_inner=1.0,
+        rho_outer=0.125,
+        p_outer=0.1,
+        sigma=0.1,
+        # --- complexity knobs ---
+        enable_ambient_clumps=True,
+        ambient_clump_strength=0.3,     # 외부 밀도 변동 (0.0~1.0 추천)
+        ambient_clump_corr=0.08,        # 외부 클럼프의 상관 길이(도메인 길이 스케일에 맞춰 조정)
+        enable_shell_perturb=True,
+        shell_r0=None,                  # 쉘 중심 반경 (None이면 ~2.0*sigma)
+        shell_width=None,               # 쉘 두께 (None이면 ~0.35*sigma)
+        shell_perturb_strength_p=0.15,  # 쉘에서 압력 perturb 비율
+        shell_perturb_strength_rho=0.10,# 쉘에서 밀도 perturb 비율
+        shell_noise_corr=0.05,          # 쉘 perturb 노이즈 상관 길이
+        seed=None,
+        floor_rho=1e-10,
+        floor_p=1e-10,
+    ):
+        """
+        3D 폭발에서 복잡한 비대칭 구조가 성장하도록 설계한 초기 조건.
+        - 구대칭 폭발(가우시안) + 외부 다중스케일 밀도 클럼프 + 쉘(접촉면 부근) perturb
+        """
+
+        # RNG (재현성)
+        if seed is not None:
+            g = torch.Generator(device=self.device)
+            g.manual_seed(int(seed))
+        else:
+            g = None
+
+        # CELL: (Nz+2, Ny+2, Nx+2, 5) - [rho, u, v, w, p]
+        CELL = torch.zeros((self.num_cells_z + 2, self.num_cells_y + 2, self.num_cells_x + 2, 5),
+                        device=self.device)
+
+        # center
         center_x = (self.x_domain[0] + self.x_domain[1]) / 2
         center_y = (self.y_domain[0] + self.y_domain[1]) / 2
         center_z = (self.z_domain[0] + self.z_domain[1]) / 2
 
-        # 각 셀의 중심 좌표 계산 (ghost cell 제외한 실제 셀만)
-        x_coords = torch.linspace(self.x_domain[0] + self.dx/2, self.x_domain[1] - self.dx/2, 
-                                 self.num_cells_x, device=self.device)
-        y_coords = torch.linspace(self.y_domain[0] + self.dy/2, self.y_domain[1] - self.dy/2, 
-                                 self.num_cells_y, device=self.device)
-        z_coords = torch.linspace(self.z_domain[0] + self.dz/2, self.z_domain[1] - self.dz/2, 
-                                 self.num_cells_z, device=self.device)
-        X, Y, Z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='xy')
+        # coords (cell-centered, no ghosts)
+        x_coords = torch.linspace(self.x_domain[0] + self.dx/2, self.x_domain[1] - self.dx/2,
+                                self.num_cells_x, device=self.device)
+        y_coords = torch.linspace(self.y_domain[0] + self.dy/2, self.y_domain[1] - self.dy/2,
+                                self.num_cells_y, device=self.device)
+        z_coords = torch.linspace(self.z_domain[0] + self.dz/2, self.z_domain[1] - self.dz/2,
+                                self.num_cells_z, device=self.device)
 
-        # 중심으로부터의 거리 계산
-        distances2 = (X - center_x)**2 + (Y - center_y)**2 + (Z - center_z)**2
-        # === Smooth Gaussian Profile ===
-        # exp(-r²/(2σ²)) 형태
-        gaussian_profile = torch.exp(-distances2 / (2 * sigma**2))
+        # IMPORTANT: (z,y,x) with ij indexing -> shape (Nz,Ny,Nx)
+        Zc, Yc, Xc = torch.meshgrid(z_coords, y_coords, x_coords, indexing='ij')
 
-        # 기본값 설정 (외부 영역) - ghost cell 포함 전체
-        CELL[:, :, :, 0] = rho_outer # rho (low density)
-        CELL[:, :, :, 4] = p_outer    # p (low pressure)
+        rx = Xc - center_x
+        ry = Yc - center_y
+        rz = Zc - center_z
+        r2 = rx*rx + ry*ry + rz*rz
+        r  = torch.sqrt(r2 + 1e-30)
 
-        # 폭발 영역 설정 (고압, 고밀도) - 실제 셀만 (ghost cell 제외)
-        CELL[1:-1, 1:-1, 1:-1, 0] += (rho_inner - rho_outer) * gaussian_profile    # rho (high density)
-        CELL[1:-1, 1:-1, 1:-1, 4] += (p_inner - p_outer) * gaussian_profile     # p (high pressure)
+        # --- base outer state (includes ghosts) ---
+        CELL[:, :, :, 0] = rho_outer
+        CELL[:, :, :, 4] = p_outer
+        # velocities already 0
+
+        # --- base explosion: smooth Gaussian bump ---
+        gaussian = torch.exp(-r2 / (2 * sigma**2))
+
+        CELL[1:-1, 1:-1, 1:-1, 0] += (rho_inner - rho_outer) * gaussian
+        CELL[1:-1, 1:-1, 1:-1, 4] += (p_inner   - p_outer)   * gaussian
+
+        # --- (A) ambient clumps: density inhomogeneity OUTSIDE the core ---
+        # 목표: shock가 불균일 매질을 만나면서 RM/KH 등이 자라게 하기
+        if enable_ambient_clumps and ambient_clump_strength > 0:
+            # 외부에만 주기: 중심부(폭발 core)에는 거의 0
+            # core_mask ~ 0 at r=0, -> 1 outside
+            core_mask = 1.0 - torch.exp(-(r/(2.0*sigma))**6)  # 더 급하게 core를 보호
+            # 부드러운 노이즈 (네가 이미 가진 함수 사용)
+            # NOTE: generate_smooth_noise_fft는 corr length를 받을 수 있으면 가장 좋음.
+            # 여기서는 함수 시그니처를 모른다고 가정하고, 결과를 필터링/스케일링만.
+            n1 = generate_smooth_noise_fft(gaussian.shape, device=self.device)  # ~[-1,1] 또는 비슷
+            # 밀도에 log-perturb를 주면 음수 위험이 적고 클럼프가 자연스러움
+            # rho <- rho * exp(A * noise)
+            A = float(ambient_clump_strength)
+            rho_field = CELL[1:-1, 1:-1, 1:-1, 0]
+            rho_field = rho_field * torch.exp(A * core_mask * n1)
+            CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(rho_field, min=floor_rho)
+
+        # --- (B) shell perturb: contact/forward shock가 형성되는 반경대에 씨앗을 집중 ---
+        if enable_shell_perturb:
+            if shell_r0 is None:
+                shell_r0 = 2.0 * sigma
+            if shell_width is None:
+                shell_width = 0.35 * sigma
+
+            shell = torch.exp(-0.5 * ((r - shell_r0) / shell_width)**2)  # 0~1
+
+            # 다중 모드(큰 구조 + 작은 구조) 섞으면 훨씬 "복잡"해짐
+            nL = generate_smooth_noise_fft(gaussian.shape, device=self.device)  # large-ish
+            nS = generate_smooth_noise_fft(gaussian.shape, device=self.device)  # small-ish (함수에 스케일 옵션 있으면 그걸 쓰는 게 베스트)
+            noise_shell = 0.6 * nL + 0.4 * nS
+
+            # perturb (상대 perturb, 음수 방지 위해 multiplicative 형태 추천)
+            rho0 = CELL[1:-1, 1:-1, 1:-1, 0]
+            p0   = CELL[1:-1, 1:-1, 1:-1, 4]
+
+            dr = float(shell_perturb_strength_rho)
+            dp = float(shell_perturb_strength_p)
+
+            rho1 = rho0 * (1.0 + dr * shell * noise_shell)
+            p1   = p0   * (1.0 + dp * shell * noise_shell)
+
+            CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(rho1, min=floor_rho)
+            CELL[1:-1, 1:-1, 1:-1, 4] = torch.clamp(p1,   min=floor_p)
+
+        # final safety
+        CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 0], min=floor_rho)
+        CELL[1:-1, 1:-1, 1:-1, 4] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 4], min=floor_p)
 
         return CELL
+
