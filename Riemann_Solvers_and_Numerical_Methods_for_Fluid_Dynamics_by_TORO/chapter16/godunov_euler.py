@@ -681,123 +681,61 @@ class GodunovEuler3D:
 
         return CELL, dt
 
-    def create_explosion_initial_condition_complex(
+    def create_explosion_initial_condition(
         self,
-        rho_inner=1.0,
-        p_inner=1.0,
-        rho_outer=0.125,
-        p_outer=0.1,
-        sigma=0.1,
-        # --- complexity knobs ---
-        enable_ambient_clumps=True,
-        ambient_clump_strength=0.3,     # 외부 밀도 변동 (0.0~1.0 추천)
-        ambient_clump_corr=0.08,        # 외부 클럼프의 상관 길이(도메인 길이 스케일에 맞춰 조정)
-        enable_shell_perturb=True,
-        shell_r0=None,                  # 쉘 중심 반경 (None이면 ~2.0*sigma)
-        shell_width=None,               # 쉘 두께 (None이면 ~0.35*sigma)
-        shell_perturb_strength_p=0.15,  # 쉘에서 압력 perturb 비율
-        shell_perturb_strength_rho=0.10,# 쉘에서 밀도 perturb 비율
-        shell_noise_corr=0.05,          # 쉘 perturb 노이즈 상관 길이
-        seed=None,
-        floor_rho=1e-10,
-        floor_p=1e-10,
+        rho_inner,
+        p_inner,
+        rho_outer,
+        p_outer,
+        sigma,
+        noise
     ):
         """
         3D 폭발에서 복잡한 비대칭 구조가 성장하도록 설계한 초기 조건.
         - 구대칭 폭발(가우시안) + 외부 다중스케일 밀도 클럼프 + 쉘(접촉면 부근) perturb
         """
 
-        # RNG (재현성)
-        if seed is not None:
-            g = torch.Generator(device=self.device)
-            g.manual_seed(int(seed))
-        else:
-            g = None
+        CELL = torch.zeros((self.num_cells_z + 2, self.num_cells_y + 2, self.num_cells_x + 2, 5), 
+                          device=self.device)
 
-        # CELL: (Nz+2, Ny+2, Nx+2, 5) - [rho, u, v, w, p]
-        CELL = torch.zeros((self.num_cells_z + 2, self.num_cells_y + 2, self.num_cells_x + 2, 5),
-                        device=self.device)
-
-        # center
         center_x = (self.x_domain[0] + self.x_domain[1]) / 2
         center_y = (self.y_domain[0] + self.y_domain[1]) / 2
         center_z = (self.z_domain[0] + self.z_domain[1]) / 2
+        # 각 셀의 중심 좌표 계산 (ghost cell 제외한 실제 셀만)
+        x_coords = torch.linspace(self.x_domain[0] + self.dx/2, self.x_domain[1] - self.dx/2, 
+                                 self.num_cells_x, device=self.device)
+        y_coords = torch.linspace(self.y_domain[0] + self.dy/2, self.y_domain[1] - self.dy/2, 
+                                 self.num_cells_y, device=self.device)
+        z_coords = torch.linspace(self.z_domain[0] + self.dz/2, self.z_domain[1] - self.dz/2, 
+                                 self.num_cells_z, device=self.device)
+        X, Y, Z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='xy')
 
-        # coords (cell-centered, no ghosts)
-        x_coords = torch.linspace(self.x_domain[0] + self.dx/2, self.x_domain[1] - self.dx/2,
-                                self.num_cells_x, device=self.device)
-        y_coords = torch.linspace(self.y_domain[0] + self.dy/2, self.y_domain[1] - self.dy/2,
-                                self.num_cells_y, device=self.device)
-        z_coords = torch.linspace(self.z_domain[0] + self.dz/2, self.z_domain[1] - self.dz/2,
-                                self.num_cells_z, device=self.device)
+        # 중심으로부터의 거리 계산
+        distances2 = (X - center_x)**2 + (Y - center_y)**2 + (Z - center_z)**2
+        # === Smooth Gaussian Profile ===
+        # exp(-r²/(2σ²)) 형태
+        gaussian_profile = torch.exp(-distances2 / (2 * sigma**2))
 
-        # IMPORTANT: (z,y,x) with ij indexing -> shape (Nz,Ny,Nx)
-        Zc, Yc, Xc = torch.meshgrid(z_coords, y_coords, x_coords, indexing='ij')
+        # 기본값 설정 (외부 영역) - ghost cell 포함 전체
+        CELL[:, :, :, 0] = rho_outer # rho (low density)
+        CELL[:, :, :, 4] = p_outer    # p (low pressure)
 
-        rx = Xc - center_x
-        ry = Yc - center_y
-        rz = Zc - center_z
-        r2 = rx*rx + ry*ry + rz*rz
-        r  = torch.sqrt(r2 + 1e-30)
+        # 폭발 영역 설정 (고압, 고밀도) - 실제 셀만 (ghost cell 제외)
+        CELL[1:-1, 1:-1, 1:-1, 0] += (rho_inner - rho_outer) * gaussian_profile    # rho (high density)
+        CELL[1:-1, 1:-1, 1:-1, 4] += (p_inner - p_outer) * gaussian_profile     # p (high pressure)
 
-        # --- base outer state (includes ghosts) ---
-        CELL[:, :, :, 0] = rho_outer
-        CELL[:, :, :, 4] = p_outer
-        # velocities already 0
-
-        # --- base explosion: smooth Gaussian bump ---
-        gaussian = torch.exp(-r2 / (2 * sigma**2))
-
-        CELL[1:-1, 1:-1, 1:-1, 0] += (rho_inner - rho_outer) * gaussian
-        CELL[1:-1, 1:-1, 1:-1, 4] += (p_inner   - p_outer)   * gaussian
-
-        # --- (A) ambient clumps: density inhomogeneity OUTSIDE the core ---
-        # 목표: shock가 불균일 매질을 만나면서 RM/KH 등이 자라게 하기
-        if enable_ambient_clumps and ambient_clump_strength > 0:
-            # 외부에만 주기: 중심부(폭발 core)에는 거의 0
-            # core_mask ~ 0 at r=0, -> 1 outside
-            core_mask = 1.0 - torch.exp(-(r/(2.0*sigma))**6)  # 더 급하게 core를 보호
-            # 부드러운 노이즈 (네가 이미 가진 함수 사용)
-            # NOTE: generate_smooth_noise_fft는 corr length를 받을 수 있으면 가장 좋음.
-            # 여기서는 함수 시그니처를 모른다고 가정하고, 결과를 필터링/스케일링만.
-            n1 = generate_smooth_noise_fft(gaussian.shape, device=self.device)  # ~[-1,1] 또는 비슷
-            # 밀도에 log-perturb를 주면 음수 위험이 적고 클럼프가 자연스러움
-            # rho <- rho * exp(A * noise)
-            A = float(ambient_clump_strength)
-            rho_field = CELL[1:-1, 1:-1, 1:-1, 0]
-            rho_field = rho_field * torch.exp(A * core_mask * n1)
-            CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(rho_field, min=floor_rho)
-
-        # --- (B) shell perturb: contact/forward shock가 형성되는 반경대에 씨앗을 집중 ---
-        if enable_shell_perturb:
-            if shell_r0 is None:
-                shell_r0 = 2.0 * sigma
-            if shell_width is None:
-                shell_width = 0.35 * sigma
-
-            shell = torch.exp(-0.5 * ((r - shell_r0) / shell_width)**2)  # 0~1
-
+        if noise:
             # 다중 모드(큰 구조 + 작은 구조) 섞으면 훨씬 "복잡"해짐
-            nL = generate_smooth_noise_fft(gaussian.shape, device=self.device)  # large-ish
-            nS = generate_smooth_noise_fft(gaussian.shape, device=self.device)  # small-ish (함수에 스케일 옵션 있으면 그걸 쓰는 게 베스트)
-            noise_shell = 0.6 * nL + 0.4 * nS
+            z, y, x = gaussian_profile.shape
+            rho_noise_field = generate_smooth_noise_fft((z, y, x), device=self.device)
+            p_noise_field = generate_smooth_noise_fft((z, y, x), device=self.device)
 
-            # perturb (상대 perturb, 음수 방지 위해 multiplicative 형태 추천)
-            rho0 = CELL[1:-1, 1:-1, 1:-1, 0]
-            p0   = CELL[1:-1, 1:-1, 1:-1, 4]
-
-            dr = float(shell_perturb_strength_rho)
-            dp = float(shell_perturb_strength_p)
-
-            rho1 = rho0 * (1.0 + dr * shell * noise_shell)
-            p1   = p0   * (1.0 + dp * shell * noise_shell)
-
-            CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(rho1, min=floor_rho)
-            CELL[1:-1, 1:-1, 1:-1, 4] = torch.clamp(p1,   min=floor_p)
+            CELL[1:-1, 1:-1, 1:-1, 0] += noise * gaussian_profile * rho_noise_field
+            CELL[1:-1, 1:-1, 1:-1, 4] += noise * gaussian_profile * p_noise_field
 
         # final safety
-        CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 0], min=floor_rho)
-        CELL[1:-1, 1:-1, 1:-1, 4] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 4], min=floor_p)
+        CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 0], min=1e-10)
+        CELL[1:-1, 1:-1, 1:-1, 4] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 4], min=1e-10)
 
         return CELL
 
