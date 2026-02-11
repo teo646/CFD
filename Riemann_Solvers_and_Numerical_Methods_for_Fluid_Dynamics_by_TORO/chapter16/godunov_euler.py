@@ -4,9 +4,8 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-import random
 
-def generate_smooth_noise_fft(shape, k0=5.0, device=None):
+def generate_smooth_noise_fft(shape, k0=50.0, device=None):
     nz, ny, nx = shape
     kx = np.fft.fftfreq(nx)
     ky = np.fft.fftfreq(ny)
@@ -20,7 +19,7 @@ def generate_smooth_noise_fft(shape, k0=5.0, device=None):
     noise /= np.std(noise)
     return torch.from_numpy(noise).to(device)
 
-class GodunovEuler3D:
+class GodunovEuler:
     """
     3D Euler equations solver using Godunov's method with exact Riemann solver.
     
@@ -39,7 +38,8 @@ class GodunovEuler3D:
         cfl_coefficient=0.8,
         GAMMA=1.4,
         tol=1e-6,
-        device=None
+        device=None,
+        boundary_condition='reflect'
     ):
         """
         Initialize the 3D Euler solver.
@@ -59,6 +59,14 @@ class GodunovEuler3D:
         device : torch.device, optional
             Device to run computations on. If None, uses CUDA if available, else CPU.
         """
+
+        if(num_cells_z is None or num_cells_z == 1):
+            num_cells_z = 1
+            z_domain = [0, 1]
+            self.thin_3d = True
+        else:
+            self.thin_3d = False
+
         # Domain parameters
         self.num_cells_x = num_cells_x
         self.num_cells_y = num_cells_y
@@ -85,10 +93,16 @@ class GodunovEuler3D:
         
         # Move tolerance to device
         self.tol_tensor = torch.tensor(self.tol, device=self.device)
-    
+        if(boundary_condition == 'reflective'):
+            self.apply_boundary_condition = self.apply_reflective_bc
+        elif(boundary_condition == 'transmissive'):
+            self.apply_boundary_condition = self.apply_transmissive_bc
+        else:
+            raise ValueError("boundary_condition must be 'reflect' or 'transmissive'")
+
     def compute_f_and_df(self, p, W_L, W_R):
         """
-        W_L, W_R: (..., 4) - [rho, u, v, p] primitive variables
+        W_L, W_R: (..., 5) - [rho, u, v, w, p] primitive variables
         p: (...,) - pressure guess
         """
         left_rho = W_L[..., 0]
@@ -159,9 +173,7 @@ class GodunovEuler3D:
         # Initial guess for the pressure
         # Should be optimaized using Two–Rarefaction approximation, primitive variables, Two–Shock approximation.
         p = 0.5 * (left_p + right_p)
-        count = 0
         while(True):
-            count += 1
             prev_p = p
             fl, d_fl, fr, d_fr = self.compute_f_and_df(p, W_L, W_R)
 
@@ -172,8 +184,7 @@ class GodunovEuler3D:
             #음압 방지.
             p = torch.clamp(p, min=torch.tensor(1e-12, device=p.device))
             #모든 셀에서 충족하면 종료.
-            tol_tensor = torch.tensor(self.tol, device=p.device)
-            if(torch.all(2 * abs(p - prev_p) < tol_tensor * (p + prev_p)) or count > 1000):
+            if(torch.all(2 * abs(p - prev_p) < self.tol_tensor * (p + prev_p))):
                 break
         
         fl, d_fl, fr, d_fr = self.compute_f_and_df(p, W_L, W_R)
@@ -256,92 +267,78 @@ class GodunovEuler3D:
         right_shock = ~right_rarefaction
 
         # -------- Left rarefaction --------
-        if torch.any(left_contact & left_rarefaction):
-            al = torch.sqrt(self.GAMMA * left_p / left_rho)
-            s_hl = left_u - al
+        al = torch.sqrt(self.GAMMA * left_p / left_rho)
+        s_hl = left_u - al
 
-            # Region 1: left state
-            mask_l1 = left_contact & left_rarefaction & (s < s_hl) 
-            if torch.any(mask_l1):
-                rho[mask_l1] = left_rho[mask_l1]
-                u[mask_l1] = left_u[mask_l1]
-                p[mask_l1] = left_p[mask_l1]
+        # Region 1: left state
+        mask_l1 = left_contact & left_rarefaction & (s < s_hl) 
+        rho[mask_l1] = left_rho[mask_l1]
+        u[mask_l1] = left_u[mask_l1]
+        p[mask_l1] = left_p[mask_l1]
 
-            # Region 2: star left
-            al_star = al * (p_star / left_p) ** ((self.GAMMA - 1) / (2 * self.GAMMA))
-            s_tl = u_star - al_star
-            mask_l2 = left_contact & left_rarefaction & (s > s_tl)
-            if torch.any(mask_l2):
-                rho[mask_l2] = rho_l_star[mask_l2]
-                u[mask_l2] = u_star[mask_l2]
-                p[mask_l2] = p_star[mask_l2]
+        # Region 2: star left
+        al_star = al * (p_star / left_p) ** ((self.GAMMA - 1) / (2 * self.GAMMA))
+        s_tl = u_star - al_star
+        mask_l2 = left_contact & left_rarefaction & (s > s_tl)
+        rho[mask_l2] = rho_l_star[mask_l2]
+        u[mask_l2] = u_star[mask_l2]
+        p[mask_l2] = p_star[mask_l2]
 
-            # Region 3: inside fan
-            mask_l3 = left_contact & left_rarefaction & ~(s < s_hl) & ~(s > s_tl)
-            if torch.any(mask_l3):
-                p[mask_l3] = left_p[mask_l3] * ((2 * al[mask_l3] + (self.GAMMA - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.GAMMA + 1))) ** (2 * self.GAMMA / (self.GAMMA - 1))
-                u[mask_l3] = 2 / (self.GAMMA + 1) * (al[mask_l3] + (self.GAMMA - 1) / 2 * left_u[mask_l3] + s[mask_l3])
-                rho[mask_l3] = left_rho[mask_l3] * ((2 * al[mask_l3] + (self.GAMMA - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.GAMMA + 1))) ** (2 / (self.GAMMA - 1))
+        # Region 3: inside fan
+        mask_l3 = left_contact & left_rarefaction & ~(s < s_hl) & ~(s > s_tl)
+        p[mask_l3] = left_p[mask_l3] * ((2 * al[mask_l3] + (self.GAMMA - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.GAMMA + 1))) ** (2 * self.GAMMA / (self.GAMMA - 1))
+        u[mask_l3] = 2 / (self.GAMMA + 1) * (al[mask_l3] + (self.GAMMA - 1) / 2 * left_u[mask_l3] + s[mask_l3])
+        rho[mask_l3] = left_rho[mask_l3] * ((2 * al[mask_l3] + (self.GAMMA - 1) * (left_u[mask_l3] - s[mask_l3])) / (al[mask_l3] * (self.GAMMA + 1))) ** (2 / (self.GAMMA - 1))
 
         # -------- Left shock --------
-        if torch.any(left_contact & left_shock):
-            al = torch.sqrt(self.GAMMA * left_p / left_rho)
-            s_l = left_u - al * torch.sqrt((self.GAMMA * (p_star + left_p) + p_star - left_p) / (2 * self.GAMMA * left_p))
-            mask_ls = left_contact & left_shock & (s < s_l)
-            if torch.any(mask_ls):
-                rho[mask_ls] = left_rho[mask_ls]
-                u[mask_ls] = left_u[mask_ls]
-                p[mask_ls] = left_p[mask_ls]
+        al = torch.sqrt(self.GAMMA * left_p / left_rho)
+        s_l = left_u - al * torch.sqrt((self.GAMMA * (p_star + left_p) + p_star - left_p) / (2 * self.GAMMA * left_p))
+        mask_ls = left_contact & left_shock & (s < s_l)
+        rho[mask_ls] = left_rho[mask_ls]
+        u[mask_ls] = left_u[mask_ls]
+        p[mask_ls] = left_p[mask_ls]
 
-            mask_ls2 = left_contact & left_shock & ~(s < s_l)
-            if torch.any(mask_ls2):
-                rho[mask_ls2] = rho_l_star[mask_ls2]
-                u[mask_ls2] = u_star[mask_ls2]
-                p[mask_ls2] = p_star[mask_ls2]
+        mask_ls2 = left_contact & left_shock & ~(s < s_l)
+        rho[mask_ls2] = rho_l_star[mask_ls2]
+        u[mask_ls2] = u_star[mask_ls2]
+        p[mask_ls2] = p_star[mask_ls2]
 
         # -------- Right rarefaction --------
-        if torch.any(right_contact & right_rarefaction):
-            ar = torch.sqrt(self.GAMMA * right_p / right_rho)
-            s_hr = right_u + ar
+        ar = torch.sqrt(self.GAMMA * right_p / right_rho)
+        s_hr = right_u + ar
 
-            # Region 1: right state
-            mask_r1 = right_contact & right_rarefaction & (s > s_hr)
-            if torch.any(mask_r1):
-                rho[mask_r1] = right_rho[mask_r1]
-                u[mask_r1] = right_u[mask_r1]
-                p[mask_r1] = right_p[mask_r1]
+        # Region 1: right state
+        mask_r1 = right_contact & right_rarefaction & (s > s_hr)
+        rho[mask_r1] = right_rho[mask_r1]
+        u[mask_r1] = right_u[mask_r1]
+        p[mask_r1] = right_p[mask_r1]
 
-            # Region 2: star right
-            ar_star = ar * (p_star / right_p) ** ((self.GAMMA - 1) / (2 * self.GAMMA))
-            s_tr = u_star + ar_star
-            mask_r2 = right_contact & right_rarefaction & (s < s_tr)
-            if torch.any(mask_r2):
-                rho[mask_r2] = rho_r_star[mask_r2]
-                u[mask_r2] = u_star[mask_r2]
-                p[mask_r2] = p_star[mask_r2]
+        # Region 2: star right
+        ar_star = ar * (p_star / right_p) ** ((self.GAMMA - 1) / (2 * self.GAMMA))
+        s_tr = u_star + ar_star
+        mask_r2 = right_contact & right_rarefaction & (s < s_tr)
+        rho[mask_r2] = rho_r_star[mask_r2]
+        u[mask_r2] = u_star[mask_r2]
+        p[mask_r2] = p_star[mask_r2]
 
             # Region 3: inside fan
-            mask_r3 = right_contact & right_rarefaction & ~(s > s_hr) & ~(s < s_tr)
-            if torch.any(mask_r3):
-                p[mask_r3] = right_p[mask_r3] * ((2 * ar[mask_r3] + (self.GAMMA - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.GAMMA + 1))) ** (2 * self.GAMMA / (self.GAMMA - 1))
-                u[mask_r3] = 2 / (self.GAMMA + 1) * (-ar[mask_r3] + (self.GAMMA - 1) / 2 * right_u[mask_r3] + s[mask_r3])
-                rho[mask_r3] = right_rho[mask_r3] * ((2 * ar[mask_r3] + (self.GAMMA - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.GAMMA + 1))) ** (2 / (self.GAMMA - 1))
+        mask_r3 = right_contact & right_rarefaction & ~(s > s_hr) & ~(s < s_tr)
+        p[mask_r3] = right_p[mask_r3] * ((2 * ar[mask_r3] + (self.GAMMA - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.GAMMA + 1))) ** (2 * self.GAMMA / (self.GAMMA - 1))
+        u[mask_r3] = 2 / (self.GAMMA + 1) * (-ar[mask_r3] + (self.GAMMA - 1) / 2 * right_u[mask_r3] + s[mask_r3])
+        rho[mask_r3] = right_rho[mask_r3] * ((2 * ar[mask_r3] + (self.GAMMA - 1) * (s[mask_r3] - right_u[mask_r3])) / (ar[mask_r3] * (self.GAMMA + 1))) ** (2 / (self.GAMMA - 1))
 
         # -------- Right shock --------
-        if torch.any(right_contact & right_shock):
-            ar = torch.sqrt(self.GAMMA * right_p / right_rho)
-            s_r = right_u + ar * torch.sqrt((self.GAMMA * (p_star + right_p) + p_star - right_p) / (2 * self.GAMMA * right_p))
-            mask_rs = right_contact & right_shock & (s > s_r)
-            if torch.any(mask_rs):
-                rho[mask_rs] = right_rho[mask_rs]
-                u[mask_rs] = right_u[mask_rs]
-                p[mask_rs] = right_p[mask_rs]
+        ar = torch.sqrt(self.GAMMA * right_p / right_rho)
+        s_r = right_u + ar * torch.sqrt((self.GAMMA * (p_star + right_p) + p_star - right_p) / (2 * self.GAMMA * right_p))
+        mask_rs = right_contact & right_shock & (s > s_r)
+        rho[mask_rs] = right_rho[mask_rs]
+        u[mask_rs] = right_u[mask_rs]
+        p[mask_rs] = right_p[mask_rs]
 
-            mask_rs2 = right_contact & right_shock & ~(s > s_r)
-            if torch.any(mask_rs2):
-                rho[mask_rs2] = rho_r_star[mask_rs2]
-                u[mask_rs2] = u_star[mask_rs2]
-                p[mask_rs2] = p_star[mask_rs2]
+        mask_rs2 = right_contact & right_shock & ~(s > s_r)
+        rho[mask_rs2] = rho_r_star[mask_rs2]
+        u[mask_rs2] = u_star[mask_rs2]
+        p[mask_rs2] = p_star[mask_rs2]
 
         # Calculate flux
         v = torch.zeros_like(left_v)
@@ -442,6 +439,17 @@ class GodunovEuler3D:
         dt_z = self.cfl_coefficient * self.dz / w_max
         return torch.min(torch.min(dt_x, dt_y), dt_z)
 
+    @staticmethod
+    def minbee_limited_slope(dL, dR, eps=1e-12):
+        """
+        dL = W_i - W_{i-1}
+        dR = W_{i+1} - W_i
+        returns limited slope Δ_i (same shape as dL/dR)
+        """
+        r = dL / (dR + eps)
+        phi = torch.clamp(r, min=0.0, max=1.0)  # max(0, min(1, r))
+        return phi * dR
+
     def muscl_reconstruction(self, CELL, dt, normal='x'):
         """
         Perform MUSCL-Hancock-type reconstruction (without TVD limiter).
@@ -473,20 +481,22 @@ class GodunovEuler3D:
         """
         # -------- pick normal velocity component u_n --------
         if normal == 'x':
-            Di = 0.5 * (CELL[:, :, 2:, :] - CELL[:, :, :-2, :])
-            Wi = CELL[:, :, 1:-1, :]  
-            dx = self.dx  
+            Wi = CELL[:, :, 1:-1, :]           # i
+            dL = CELL[:, :, 1:-1, :] - CELL[:, :, 0:-2, :]  # i - (i-1)
+            dR = CELL[:, :, 2:  , :] - CELL[:, :, 1:-1, :]  # (i+1) - i
+            dx = self.dx
         elif normal == 'y':
-            Di = 0.5 * (CELL[:, 2:, :, :] - CELL[:, :-2, :, :])
             Wi = CELL[:, 1:-1, :, :]
+            dL = CELL[:, 1:-1, :, :] - CELL[:, 0:-2, :, :]
+            dR = CELL[:, 2:  , :, :] - CELL[:, 1:-1, :, :]
             dx = self.dy
         elif normal == 'z':
-            Di = 0.5 * (CELL[2:, :, :, :] - CELL[:-2, :, :, :])
             Wi = CELL[1:-1, :, :, :]
+            dL = CELL[1:-1, :, :, :] - CELL[0:-2, :, :, :]
+            dR = CELL[2:  , :, :, :] - CELL[1:-1, :, :, :]
             dx = self.dz
-        else:
-            raise ValueError("normal must be 'x' or 'y' or 'z'")
 
+        Di = self.minbee_limited_slope(dL, dR, eps=1e-12)
         #calculate (A(Wi) + B(Wi) + C(Wi)) Di = K
         rho = Wi[..., 0]
         u = Wi[..., 1]
@@ -538,6 +548,93 @@ class GodunovEuler3D:
         else:
             raise ValueError("normal must be 'x' or 'y' or 'z'")
 
+    @staticmethod
+    def apply_reflective_bc(CELL: "torch.Tensor", normal='x'):
+        """
+        Apply reflective (wall) boundary condition on both sides along `normal`.
+
+        CELL: (..., 5) with [rho, u, v, w, p]
+        normal: 'x' or 'y' or 'z'
+        """
+        # which spatial axis is normal?
+        axis = {'z': 0, 'y': 1, 'x': 2}[normal]
+        # which velocity component index is normal? (u=1, v=2, w=3)
+        v_idx = {'x': 1, 'y': 2, 'z': 3}[normal]
+
+        # --- left side ghosts: [1] <- [2], [0] <- [3] ---
+        # copy everything first
+        src1 = [slice(None), slice(None), slice(None)]
+        src2 = [slice(None), slice(None), slice(None)]
+        dst1 = [slice(None), slice(None), slice(None)]
+        dst2 = [slice(None), slice(None), slice(None)]
+
+        dst1[axis] = 1; src1[axis] = 2
+        dst2[axis] = 0; src2[axis] = 3
+
+        CELL[tuple(dst1) + (slice(None),)] = CELL[tuple(src1) + (slice(None),)]
+        CELL[tuple(dst2) + (slice(None),)] = CELL[tuple(src2) + (slice(None),)]
+
+        # flip only normal velocity
+        CELL[tuple(dst1) + (v_idx,)] *= -1
+        CELL[tuple(dst2) + (v_idx,)] *= -1
+
+        # --- right side ghosts: [-2] <- [-3], [-1] <- [-4] ---
+        src3 = [slice(None), slice(None), slice(None)]
+        src4 = [slice(None), slice(None), slice(None)]
+        dst3 = [slice(None), slice(None), slice(None)]
+        dst4 = [slice(None), slice(None), slice(None)]
+
+        dst3[axis] = -2; src3[axis] = -3
+        dst4[axis] = -1; src4[axis] = -4
+
+        CELL[tuple(dst3) + (slice(None),)] = CELL[tuple(src3) + (slice(None),)]
+        CELL[tuple(dst4) + (slice(None),)] = CELL[tuple(src4) + (slice(None),)]
+
+        CELL[tuple(dst3) + (v_idx,)] *= -1
+        CELL[tuple(dst4) + (v_idx,)] *= -1
+
+        return CELL
+
+    @staticmethod
+    def apply_transmissive_bc(CELL: "torch.Tensor", normal='x'):
+        """
+        Apply transmissive (zero-gradient) boundary condition
+        on both sides along `normal`.
+
+        CELL: (..., 5) with [rho, u, v, w, p]
+        normal: 'x' or 'y' or 'z'
+        """
+
+        # spatial axis index
+        axis = {'z': 0, 'y': 1, 'x': 2}[normal]
+
+        # --- left side ghosts ---
+        src1 = [slice(None), slice(None), slice(None)]
+        src2 = [slice(None), slice(None), slice(None)]
+        dst1 = [slice(None), slice(None), slice(None)]
+        dst2 = [slice(None), slice(None), slice(None)]
+
+        dst1[axis] = 1; src1[axis] = 2
+        dst2[axis] = 0; src2[axis] = 3
+
+        CELL[tuple(dst1) + (slice(None),)] = CELL[tuple(src1) + (slice(None),)]
+        CELL[tuple(dst2) + (slice(None),)] = CELL[tuple(src2) + (slice(None),)]
+
+        # --- right side ghosts ---
+        src3 = [slice(None), slice(None), slice(None)]
+        src4 = [slice(None), slice(None), slice(None)]
+        dst3 = [slice(None), slice(None), slice(None)]
+        dst4 = [slice(None), slice(None), slice(None)]
+
+        dst3[axis] = -2; src3[axis] = -3
+        dst4[axis] = -1; src4[axis] = -4
+
+        CELL[tuple(dst3) + (slice(None),)] = CELL[tuple(src3) + (slice(None),)]
+        CELL[tuple(dst4) + (slice(None),)] = CELL[tuple(src4) + (slice(None),)]
+
+        return CELL
+
+
 
     def sweep_x(self, CELL, dt):
         """
@@ -567,12 +664,7 @@ class GodunovEuler3D:
         # Convert back to primitive
         CELL[:, :, 2:-2, :] = self.U_to_W(U_new)
         
-        # Apply boundary conditions in x-direction
-        CELL[:, :, 1, :] = CELL[:, :, 2, :]
-        CELL[:, :, 0, :] = CELL[:, :, 3, :]
-
-        CELL[:, :, -2, :] = CELL[:, :, -3, :]
-        CELL[:, :, -1, :] = CELL[:, :, -4, :]
+        CELL = self.apply_boundary_condition(CELL, normal='x')
 
         return CELL
     
@@ -605,12 +697,8 @@ class GodunovEuler3D:
         # Final update
         CELL[:, 2:-2, :, :] = self.U_to_W(U_new)
         
-        # Apply boundary conditions in y-direction
-        CELL[:, 1, :, :] = CELL[:, 2, :, :]
-        CELL[:, 0, :, :] = CELL[:, 3, :, :]
+        CELL = self.apply_boundary_condition(CELL, normal='y')
 
-        CELL[:, -2, :, :] = CELL[:, -3, :, :]
-        CELL[:, -1, :, :] = CELL[:, -4, :, :]
         
         return CELL
     
@@ -633,23 +721,15 @@ class GodunovEuler3D:
         # Z-direction sweep: solve Riemann problems along z-direction for each x
         WL, WR = self.muscl_reconstruction(CELL, dt, normal='z')
         flux_z = self.riemann_flux(WL, WR, normal='z')
-        
         # Update in z-direction
         U_cell = self.W_to_U(CELL[2:-2, :, :, :])
-                    
         # Z-direction update
         U_new = U_cell + dt/self.dz * (flux_z[:-1, :, :, :] - flux_z[1:, :, :, :])
-        
         # Final update
         CELL[2:-2, :, :, :] = self.U_to_W(U_new)
-        
-        # Apply boundary conditions in z-direction
-        CELL[1, :, :, :] = CELL[2, :, :, :]
-        CELL[0, :, :, :] = CELL[3, :, :, :]
 
-        CELL[-2, :, :, :] = CELL[-3, :, :, :]
-        CELL[-1, :, :, :] = CELL[-4, :, :, :]
-        
+        CELL = self.apply_boundary_condition(CELL, normal='z')
+
         return CELL
     
     def update(self, CELL):
@@ -668,16 +748,19 @@ class GodunovEuler3D:
         dt : float
             Time step used
         """
+
         dt = self.cal_dt(CELL).item()
 
-        sweep_order = [self.sweep_x, self.sweep_y, self.sweep_z]
-        random.shuffle(sweep_order)
-
-        CELL = sweep_order[0](CELL, dt * 0.5)
-        CELL = sweep_order[1](CELL, dt * 0.5)
-        CELL = sweep_order[2](CELL, dt)
-        CELL = sweep_order[1](CELL, dt * 0.5)
-        CELL = sweep_order[0](CELL, dt * 0.5)
+        if(self.thin_3d):
+            CELL = self.sweep_x(CELL, dt * 0.5)
+            CELL = self.sweep_y(CELL, dt)
+            CELL = self.sweep_x(CELL, dt * 0.5)
+        else:
+            CELL = self.sweep_x(CELL, dt * 0.5)
+            CELL = self.sweep_y(CELL, dt * 0.5)
+            CELL = self.sweep_z(CELL, dt)
+            CELL = self.sweep_y(CELL, dt * 0.5)
+            CELL = self.sweep_x(CELL, dt * 0.5)
 
         return CELL, dt
 
@@ -695,47 +778,43 @@ class GodunovEuler3D:
         - 구대칭 폭발(가우시안) + 외부 다중스케일 밀도 클럼프 + 쉘(접촉면 부근) perturb
         """
 
-        CELL = torch.zeros((self.num_cells_z + 2, self.num_cells_y + 2, self.num_cells_x + 2, 5), 
+        CELL = torch.zeros((self.num_cells_z, self.num_cells_y, self.num_cells_x, 5), 
                           device=self.device)
 
         center_x = (self.x_domain[0] + self.x_domain[1]) / 2
         center_y = (self.y_domain[0] + self.y_domain[1]) / 2
         center_z = (self.z_domain[0] + self.z_domain[1]) / 2
         # 각 셀의 중심 좌표 계산 (ghost cell 제외한 실제 셀만)
-        x_coords = torch.linspace(self.x_domain[0] + self.dx/2, self.x_domain[1] - self.dx/2, 
-                                 self.num_cells_x, device=self.device)
-        y_coords = torch.linspace(self.y_domain[0] + self.dy/2, self.y_domain[1] - self.dy/2, 
-                                 self.num_cells_y, device=self.device)
-        z_coords = torch.linspace(self.z_domain[0] + self.dz/2, self.z_domain[1] - self.dz/2, 
-                                 self.num_cells_z, device=self.device)
-        X, Y, Z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='xy')
+        x_coords = torch.linspace(self.x_domain[0], self.x_domain[1], self.num_cells_x, device=self.device)
+        y_coords = torch.linspace(self.y_domain[0], self.y_domain[1], self.num_cells_y, device=self.device)
+        z_coords = torch.linspace(self.z_domain[0], self.z_domain[1], self.num_cells_z, device=self.device)
+        Z, Y, X = torch.meshgrid(z_coords, y_coords, x_coords, indexing='ij')
 
         # 중심으로부터의 거리 계산
-        distances2 = (X - center_x)**2 + (Y - center_y)**2 + (Z - center_z)**2
+        if(self.thin_3d):
+            distances2 = (X - center_x)**2 + (Y - center_y)**2
+        else:
+            distances2 = (X - center_x)**2 + (Y - center_y)**2 + (Z - center_z)**2
         # === Smooth Gaussian Profile ===
         # exp(-r²/(2σ²)) 형태
         gaussian_profile = torch.exp(-distances2 / (2 * sigma**2))
 
         # 기본값 설정 (외부 영역) - ghost cell 포함 전체
-        CELL[:, :, :, 0] = rho_outer # rho (low density)
-        CELL[:, :, :, 4] = p_outer    # p (low pressure)
+        CELL[..., 0] = rho_outer # rho (low density)
+        CELL[..., 4] = p_outer    # p (low pressure)
 
         # 폭발 영역 설정 (고압, 고밀도) - 실제 셀만 (ghost cell 제외)
-        CELL[1:-1, 1:-1, 1:-1, 0] += (rho_inner - rho_outer) * gaussian_profile    # rho (high density)
-        CELL[1:-1, 1:-1, 1:-1, 4] += (p_inner - p_outer) * gaussian_profile     # p (high pressure)
+        CELL[..., 0] += (rho_inner - rho_outer) * gaussian_profile    # rho (high density)
+        CELL[..., 4] += (p_inner - p_outer) * gaussian_profile     # p (high pressure)
+            
+        z, y, x = gaussian_profile.shape
+        rho_noise_field = generate_smooth_noise_fft((z, y, x), device=self.device)
 
-        if noise:
-            # 다중 모드(큰 구조 + 작은 구조) 섞으면 훨씬 "복잡"해짐
-            z, y, x = gaussian_profile.shape
-            rho_noise_field = generate_smooth_noise_fft((z, y, x), device=self.device)
-            p_noise_field = generate_smooth_noise_fft((z, y, x), device=self.device)
-
-            CELL[1:-1, 1:-1, 1:-1, 0] += noise * gaussian_profile * rho_noise_field
-            CELL[1:-1, 1:-1, 1:-1, 4] += noise * gaussian_profile * p_noise_field
+        CELL[..., 0] += noise * rho_noise_field
 
         # final safety
-        CELL[1:-1, 1:-1, 1:-1, 0] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 0], min=1e-10)
-        CELL[1:-1, 1:-1, 1:-1, 4] = torch.clamp(CELL[1:-1, 1:-1, 1:-1, 4], min=1e-10)
+        CELL[..., 0] = torch.clamp(CELL[..., 0], min=1e-10)
+        CELL[..., 4] = torch.clamp(CELL[..., 4], min=1e-10)
 
         return CELL
 
