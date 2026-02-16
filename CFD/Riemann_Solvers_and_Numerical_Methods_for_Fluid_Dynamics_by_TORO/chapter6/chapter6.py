@@ -3,6 +3,7 @@ Exact Riemann solver for 1 dimensional Euler equations.
 Revised to support 3 dimensional Euler equations.
 '''
 import torch
+from CFD import W_to_F
 
 RIEMANN_SOLVER_TOL = 1e-6
 
@@ -118,36 +119,20 @@ def exact_riemann_flux(W_L, W_R, GAMMA, normal='x'):
     normal: 'x' or 'y' - direction of the Riemann problem
     Returns: (..., 4) - flux at the interface
     """
+    VEL_IDX = {
+    'x': (1,2,3),
+    'y': (2,3,1),
+    'z': (3,1,2),
+    }
+    n, t1, t2 = VEL_IDX[normal]
+
     # Extract variables from state
     left_rho = W_L[..., 0]
-    left_p = W_L[..., 4]
     right_rho = W_R[..., 0]
+    left_u = W_L[..., n]
+    right_u = W_R[..., n]
+    left_p = W_L[..., 4]
     right_p = W_R[..., 4]
-    
-    # Select velocity component based on normal direction
-    if normal == 'x':
-        left_u = W_L[..., 1]  # u component
-        right_u = W_R[..., 1]
-        left_v = W_L[..., 2]  # v component (perpendicular)
-        right_v = W_R[..., 2]
-        left_w = W_L[..., 3]  # w component (perpendicular)
-        right_w = W_R[..., 3]
-    elif normal == 'y':
-        left_u = W_L[..., 2]  # v component
-        right_u = W_R[..., 2]
-        left_v = W_L[..., 1]  # u component (perpendicular)
-        right_v = W_R[..., 1]
-        left_w = W_L[..., 3]  # w component (perpendicular)
-        right_w = W_R[..., 3]
-    elif normal == 'z':
-        left_u = W_L[..., 3]  # w component
-        right_u = W_R[..., 3]
-        left_v = W_L[..., 2]  # v component (perpendicular)
-        right_v = W_R[..., 2]
-        left_w = W_L[..., 1]  # u component (perpendicular)
-        right_w = W_R[..., 1]
-    else:
-        raise ValueError("normal must be 'x', 'y' or 'z'")
     
     p_star, u_star, rho_l_star, rho_r_star = solve_riemann_star_state(W_L, W_R, GAMMA, normal=normal)
 
@@ -247,34 +232,23 @@ def exact_riemann_flux(W_L, W_R, GAMMA, normal='x'):
     p[mask_rs2] = p_star[mask_rs2]
 
     # Calculate flux
-    v = torch.zeros_like(left_v)
-    v[left_contact] = left_v[left_contact]
-    v[right_contact] = right_v[right_contact]
+    v = torch.zeros_like(W_L[..., t1])
+    v[left_contact] = W_L[..., t1][left_contact]
+    v[right_contact] = W_R[..., t1][right_contact]
 
-    w = torch.zeros_like(left_w)
-    w[left_contact] = left_w[left_contact]
-    w[right_contact] = right_w[right_contact]
-
-    E = p / (GAMMA - 1) + 0.5 * rho * (u**2 + v**2 + w**2)
+    w = torch.zeros_like(W_L[..., t2])
+    w[left_contact] = W_L[..., t2][left_contact]
+    w[right_contact] = W_R[..., t2][right_contact]
     
-    flux = torch.zeros((*shape, 5), device=rho.device)
-    flux[..., 0] = rho * u                    # F_rho
-    flux[..., 4] = u * (E + p)                # F_E
+    W = torch.zeros_like(W_L)
+    W[..., 0] = rho
+    W[..., n] = u
+    W[..., t1] = v
+    W[..., t2] = w
+    W[..., 4] = p
+    F = W_to_F(W, GAMMA, normal=normal)
 
-    if normal == 'x':
-        flux[..., 1] = rho * u**2 + p             # F_rhou
-        flux[..., 2] = rho * u * v                # F_rhov
-        flux[..., 3] = rho * u * w                # F_rhow
-    elif normal == 'y':  
-        flux[..., 1] = rho * u * v               # G_rhou  
-        flux[..., 2] = rho * u**2 + p             # G_rhov (u is v in y-direction)
-        flux[..., 3] = rho * w * u             # G_rhow
-    else:
-        flux[..., 1] = rho * w * u                # G_rhou
-        flux[..., 2] = rho * v * u                # G_rhov
-        flux[..., 3] = rho * u**2 + p             # G_rhow
-
-    return flux
+    return F
 
 def cal_dt(CELL, cfl_coefficient, dx, GAMMA):
     """

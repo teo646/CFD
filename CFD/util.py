@@ -46,6 +46,33 @@ def U_to_W(U, GAMMA):
     p = torch.clamp(p, min=1e-10)
     return torch.stack([rho, u, v, w, p], dim=-1)
 
+def W_to_F(W, GAMMA, normal='x'):
+    """
+    Convert primitive variables to flux vector.
+    
+    Parameters:
+    -----------
+    W : torch.Tensor
+        Primitive variables, shape (..., 5) - [rho, u, v, w, p]
+    """
+    rho = W[..., 0]
+    u = W[..., 1]
+    v = W[..., 2]
+    w = W[..., 3]
+    p = W[..., 4]
+    E = p / (GAMMA - 1) + 0.5 * rho * (u**2 + v**2 + w**2)
+    
+    if normal == 'x':
+        F = torch.stack([rho * u, rho * u * u + p, rho * u * v, rho * u * w, (E + p) * u], dim=-1)
+    elif normal == 'y':
+        F = torch.stack([rho * v, rho * u * v, rho * v * v + p, rho * v * w, (E + p) * v], dim=-1)
+    elif normal == 'z':
+        F = torch.stack([rho * w, rho * u * w, rho * v * w, rho * w * w + p, (E + p) * w], dim=-1)
+    else:
+        raise ValueError("normal must be 'x' or 'y' or 'z'")
+
+    return F
+
 def generate_smooth_noise_fft(shape, k0=50.0, device=None):
     nz, ny, nx = shape
     kx = np.fft.fftfreq(nx)
