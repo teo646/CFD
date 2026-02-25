@@ -36,7 +36,7 @@ def HLLC_Riemann_Solver(W_L, W_R, GAMMA, normal='x'):
     S_l = (u_l - a_l * q_l)
     S_r = (u_r + a_r * q_r)
 
-    S_star = (p_r - p_l + rho_l * u_l * (S_l - u_l) - rho_r * u_r * (S_r - u_r)) / (rho_l * (S_l - u_l) - rho_r * (S_r - u_r))
+    S_star = (p_r - p_l + rho_l * u_l * (S_l - u_l) - rho_r * u_r * (S_r - u_r)) / (rho_l * (S_l - u_l) - rho_r * (S_r - u_r) + 1e-6)
 
     #Flux calculation for left and right states
     F_l = W_to_F(W_L, GAMMA, normal=normal)

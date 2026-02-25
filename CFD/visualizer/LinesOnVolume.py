@@ -5,13 +5,14 @@ import cv2
 import numpy as np
 
 class LinesOnVolume(Visualizer):
-    def __init__(self, x_resolution, y_resolution, lines, max_length=100):
+    def __init__(self, x_resolution, y_resolution, lines, max_length=1):
         self.x_resolution = x_resolution
         self.y_resolution = y_resolution
         self.lines = lines
         self.max_length = max_length
         self.device = lines.device
 
+    @torch.no_grad()
     def redistribute_points(self):
         """
         각 polyline의 점 수를 유지하면서 점들의 위치를 일정 간격으로 재조정.
@@ -66,7 +67,8 @@ class LinesOnVolume(Visualizer):
         # 마지막 좌표 w=1 추가
         self.lines[..., 0:3] = resampled_xyz
 
-    def update(self, vector_field: torch.Tensor, dt: float, dx: float, dy: float, dz: float):
+    @torch.no_grad()
+    def update(self, cell: torch.Tensor, dt: float, dx: float, dy: float, dz: float):
         """
         vector_field: (nz, ny, nx, 3), vector_field[..., 0] = u, [..., 1] = v, [..., 2] = w
         dt: float, 시간 간격
@@ -74,10 +76,12 @@ class LinesOnVolume(Visualizer):
         dy: float, y 방향 grid 간격
         dz: float, z 방향 grid 간격
         """
+
+        velocity = cell[..., 1:4]
         if self.lines.numel() == 0:
             return
 
-        nz, ny, nx = vector_field.shape[:3]
+        nz, ny, nx = velocity.shape[:3]
 
         # 실제 공간 좌표 (물리 좌표)
         x = self.lines[..., 0]
@@ -123,9 +127,9 @@ class LinesOnVolume(Visualizer):
 
             return c0 * (1 - sz) + c1 * sz
 
-        u = trilerp(vector_field[..., 0])
-        v = trilerp(vector_field[..., 1])
-        w = trilerp(vector_field[..., 2])
+        u = trilerp(velocity[..., 0])
+        v = trilerp(velocity[..., 1])
+        w = trilerp(velocity[..., 2])
 
         # 좌표 업데이트 (물리 좌표로)
         self.lines[:, 1:, 0] = (x + u * dt)[:, 1:]
@@ -174,6 +178,63 @@ class LinesOnVolume(Visualizer):
 
         return img
 
+    def rotate(self, theta, phi, center = (0.0, 0.0, 0.0)):
+        """
+        theta: float, Z축 회전 각도 (yaw)
+        phi: float, Y축 회전 각도 (pitch)
+        center: (cx, cy, cz) 회전 중심
+        """
+        device = self.lines.device
+        dtype = self.lines.dtype
+
+        th = torch.tensor(theta, device=device, dtype=dtype)
+        ph = torch.tensor(phi,   device=device, dtype=dtype)
+
+        cth, sth = torch.cos(th), torch.sin(th)
+        cph, sph = torch.cos(ph), torch.sin(ph)
+
+        cx, cy, cz = center
+
+        # --- Rotation matrices ---
+        Rz = torch.tensor([
+            [ cth, -sth, 0.0, 0.0],
+            [ sth,  cth, 0.0, 0.0],
+            [ 0.0,  0.0, 1.0, 0.0],
+            [ 0.0,  0.0, 0.0, 1.0],
+        ], device=device, dtype=dtype)
+
+        Ry = torch.tensor([
+            [ cph, 0.0,  sph, 0.0],
+            [ 0.0, 1.0,  0.0, 0.0],
+            [-sph, 0.0,  cph, 0.0],
+            [ 0.0, 0.0,  0.0, 1.0],
+        ], device=device, dtype=dtype)
+
+        R = Ry @ Rz  # (4,4)
+
+        # --- Translation matrices ---
+        T_neg = torch.tensor([
+            [1.0, 0.0, 0.0, -cx],
+            [0.0, 1.0, 0.0, -cy],
+            [0.0, 0.0, 1.0, -cz],
+            [0.0, 0.0, 0.0,  1.0],
+        ], device=device, dtype=dtype)
+
+        T_pos = torch.tensor([
+            [1.0, 0.0, 0.0, cx],
+            [0.0, 1.0, 0.0, cy],
+            [0.0, 0.0, 1.0, cz],
+            [0.0, 0.0, 0.0, 1.0],
+        ], device=device, dtype=dtype)
+
+        # 최종 변환 행렬
+        M = T_pos @ R @ T_neg  # (4,4)
+
+        # row vector이므로 transpose
+        self.lines = self.lines @ M.T
+
+
+def create_uniform_circle_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):de
 def create_uniform_sphere_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):
     center_x = (x_domain[0] + x_domain[1]) / 2
     center_y = (y_domain[0] + y_domain[1]) / 2
@@ -238,9 +299,10 @@ def create_random_sphere_points(radius, num_polylines, num_points, x_domain, y_d
     polylines = sphere_points_3d.repeat(1, num_points, 1)  # (NUM_POLYLINE, NUM_POINTS, 4)
     return polylines
 
-def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_domain, device):
+def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):
     center_x = (x_domain[0] + x_domain[1]) / 2
     center_y = (y_domain[0] + y_domain[1]) / 2
+    center_z = (z_domain[0] + z_domain[1]) / 2
 
     # u, v ~ Uniform(0, 1)
     u = torch.rand(num_polylines, device=device)
@@ -249,11 +311,41 @@ def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_d
 
     x = center_x + radius * torch.cos(theta)
     y = center_y + radius * torch.sin(theta)
-    z = torch.zeros_like(x)
+    z = torch.full_like(x, center_z)
     w = torch.ones((num_polylines), device=device)
 
     circle_points_3d = torch.stack([x, y, z, w], dim=1) # (NUM_POLYLINE, 4)
 
     circle_points_3d = circle_points_3d.unsqueeze(1)  # (NUM_POLYLINE, 1, 4)
     polylines = circle_points_3d.repeat(1, num_points, 1)  # (NUM_POLYLINE, NUM_POINTS, 4)
+    return polylines
+
+def create_random_circle_points_v2(radius, num_polylines, num_points, x_domain, y_domain, device):
+    center_x = (x_domain[0] + x_domain[1]) / 2
+    center_y = (y_domain[0] + y_domain[1]) / 2
+
+    # random angle
+    u = torch.rand(num_polylines, device=device)
+    theta = 2 * torch.pi * u
+
+    # endpoints on circle (in xy plane)
+    x_end = center_x + radius * torch.cos(theta)
+    y_end = center_y + radius * torch.sin(theta)
+    z_end = torch.zeros_like(x_end)
+
+    # homogeneous w (keep 1)
+    w = torch.ones((num_polylines,), device=device)
+
+    # (L, 4) endpoints
+    end = torch.stack([x_end, y_end, z_end, w], dim=1)
+
+    # start point (0,0,0,1)
+    start = torch.tensor([center_x, center_y, 0.0, 1.0], device=device).view(1, 4).repeat(num_polylines, 1)
+
+    # interpolation parameters t in [0,1], (P,)
+    t = torch.linspace(0.0, 1.0, steps=num_points, device=device).view(1, num_points, 1)  # (1,P,1)
+
+    # make polylines: (L,P,4)
+    polylines = start.unsqueeze(1) * (1 - t) + end.unsqueeze(1) * t
+
     return polylines

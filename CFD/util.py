@@ -73,18 +73,68 @@ def W_to_F(W, GAMMA, normal='x'):
 
     return F
 
-def generate_smooth_noise_fft(shape, k0=50.0, device=None):
+def generate_multiband_smooth_noise_fft(
+    shape,
+    r_k0_list,   # e.g. [1/8, 1/4, 1/2]  (ratio to "cells" scale)
+    weight_list, # e.g. [1.0, 0.7, 0.3]
+    device=None,
+    eps=1e-12,
+):
+    """
+    Multi-band smooth noise using FFT with multiple Gaussian low-pass envelopes.
+
+    Parameters
+    ----------
+    shape : (nz, ny, nx)
+        Grid resolution.
+    r_k0_list : list[float]
+        Each r_k0 is a ratio to the average cell count:
+            k0_i = r_k0_i * ((nx + ny + nz) / 3)
+        Using ratios makes it behave similarly across resolutions.
+        Larger r_k0 -> smoother (stronger low-pass), smaller r_k0 -> rougher.
+    weight_list : list[float]
+        Mixing weights per band. Same length as r_k0_list.
+    device : torch.device or str or None
+        Target device for returned tensor.
+    eps : float
+        Numerical stability for std.
+
+    Returns
+    -------
+    torch.Tensor
+        Noise field of shape (nz, ny, nx), standardized to unit std.
+    """
+    if len(r_k0_list) != len(weight_list):
+        raise ValueError("r_k0_list and weight_list must have the same length.")
+
     nz, ny, nx = shape
+    if nx <= 0 or ny <= 0 or nz <= 0:
+        raise ValueError("shape must be positive in all dims.")
+
+    # Frequency grids (cycles per sample)
     kx = np.fft.fftfreq(nx)
     ky = np.fft.fftfreq(ny)
     kz = np.fft.fftfreq(nz)
     KZ, KY, KX = np.meshgrid(kz, ky, kx, indexing='ij')
+    K2 = KX**2 + KY**2 + KZ**2
 
-    spectrum = np.random.randn(nz, ny, nx) + 1j*np.random.randn(nz, ny, nx)
-    spectrum *= np.exp(-(KX**2 + KY**2 + KZ**2) * k0**2)
+    # Convert ratios -> k0 in "cell-count" scale (resolution-invariant-ish)
+    mean_n = (nx + ny + nz) / 3.0
+    k0_list = [float(r) * mean_n for r in r_k0_list]
+
+    spectrum = np.zeros((nz, ny, nx), dtype=np.complex128)
+
+    for w, k0 in zip(weight_list, k0_list):
+        # Complex white noise
+        band = np.random.randn(nz, ny, nx) + 1j * np.random.randn(nz, ny, nx)
+        # Gaussian low-pass envelope
+        band *= np.exp(-K2 * (k0**2))
+        spectrum += float(w) * band
 
     noise = np.fft.ifftn(spectrum).real
-    noise /= np.std(noise)
+    std = np.std(noise)
+    noise = noise / (std + eps)
+
     return torch.from_numpy(noise).to(device)
 
 def create_explosion_initial_condition(
@@ -100,7 +150,9 @@ def create_explosion_initial_condition(
         p_outer,
         sigma,
         noise,
-        device
+        r_k0_list = [0, 0, 0],
+        weight_list = [0, 0, 0],
+        device = None
     ):
     """
     3D 폭발에서 복잡한 비대칭 구조가 성장하도록 설계한 초기 조건.
@@ -134,10 +186,14 @@ def create_explosion_initial_condition(
     # 폭발 영역 설정 (고압, 고밀도) - 실제 셀만 (ghost cell 제외)
     CELL[..., 0] += (rho_inner - rho_outer) * gaussian_profile    # rho (high density)
     CELL[..., 4] += (p_inner - p_outer) * gaussian_profile     # p (high pressure)
-        
     z, y, x = gaussian_profile.shape
-    rho_noise_field = generate_smooth_noise_fft((z, y, x), device=device)
-
+    rho_noise_field = generate_multiband_smooth_noise_fft(
+                                                        (z, y, x),
+                                                        r_k0_list,  
+                                                        weight_list,
+                                                        device=device,
+                                                        eps=1e-12,
+                                                    )
     CELL[..., 0] += noise * rho_noise_field
 
     # final safety

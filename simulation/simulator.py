@@ -15,7 +15,8 @@ class Simulator:
         dimension,
         cfl_coefficient=0.8,
         GAMMA=1.4,
-        visualizers=[]
+        visualizers=[],
+        solid_cell = None
     ):
         """
         Initialize the 3D Euler solver.
@@ -52,9 +53,11 @@ class Simulator:
         # Physical constants
         self.cfl_coefficient = cfl_coefficient
         self.GAMMA = GAMMA
-
+        
+        self.solid_cell = solid_cell
         self.visualizers = visualizers
 
+    @torch.no_grad()
     def update(self):
 
         self.cell, dt = self.update_method(self.cell, self.cfl_coefficient,\
@@ -62,21 +65,31 @@ class Simulator:
                                         self.reconstruction_method,\
                                         self.riemann_solver,\
                                         self.boundary_function,
-                                        self.GAMMA, dimension=self.dimension)
+                                        self.GAMMA, dimension=self.dimension, 
+                                        solid_cell = self.solid_cell)
         for visualizer in self.visualizers:
-            visualizer.update(self.cell[..., 1:4], dt, self.dx, self.dy, self.dz)
+            visualizer.update(self.cell, dt, self.dx, self.dy, self.dz)
         return dt
 
     def get_images_num(self):
         # return the number of images to be displayed
-        # 2 for density and pressure
+        # 1 for density
         # len(self.visualizers) for visualizers
         return 2 + len(self.visualizers)
 
     def get_images(self):
         images = []
-        images.append(self.cell[0, :, :, 0].detach().cpu().numpy())
-        images.append(self.cell[0, :, :, 4].detach().cpu().numpy())
+        rho = self.cell[..., 0]
+        rho_image = torch.sum(rho, dim=0)
+        rho_image /= torch.max(rho_image)
+        rho_image = rho_image.detach().cpu().numpy()
+        images.append(rho_image)
+
+        p = self.cell[..., 4]
+        p_image = torch.sum(p, dim=0)
+        p_image /= torch.max(p_image)
+        p_image = p_image.detach().cpu().numpy()
+        images.append(p_image)
 
         for visualizer in self.visualizers:
             images.append(visualizer.get_image())
