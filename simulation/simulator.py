@@ -79,12 +79,14 @@ class Simulator:
 
     def get_images(self):
         images = []
+        #rho = self.cell[..., 0] * (~ self.solid_cell)
         rho = self.cell[..., 0]
         rho_image = torch.sum(rho, dim=0)
         rho_image /= torch.max(rho_image)
         rho_image = rho_image.detach().cpu().numpy()
         images.append(rho_image)
 
+        #p = self.cell[..., 4] * (~ self.solid_cell)
         p = self.cell[..., 4]
         p_image = torch.sum(p, dim=0)
         p_image /= torch.max(p_image)

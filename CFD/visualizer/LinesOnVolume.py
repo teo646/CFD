@@ -138,15 +138,15 @@ class LinesOnVolume(Visualizer):
 
         self.redistribute_points()
 
-    def get_image(self):
+    def get_image(self, scale=10):
         """
         Returns
         -------
         img : np.ndarray, uint8, shape (H, W, 3)
             Polyline들을 그린 이미지
         """
-        H = int(self.y_resolution)
-        W = int(self.x_resolution)
+        H = int(self.y_resolution * scale)
+        W = int(self.x_resolution * scale)
 
         # (L, P, 2) in pixel coords (x, y)
         projected_lines = torch.stack(
@@ -173,8 +173,11 @@ class LinesOnVolume(Visualizer):
             isClosed=False,
             color=(255, 255, 255),
             thickness=1,
-            lineType=cv2.LINE_8,  # 빠름 (더 예쁘게는 cv2.LINE_AA)
+            lineType=cv2.LINE_AA,
         )
+
+        if scale != 1:
+            img = cv2.resize(img, None, fx=1/scale, fy=1/scale)
 
         return img
 
