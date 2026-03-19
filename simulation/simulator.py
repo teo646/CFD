@@ -1,4 +1,5 @@
 import torch
+from CFD import gradient_scalar_field
 
 class Simulator:
 
@@ -79,19 +80,24 @@ class Simulator:
 
     def get_images(self):
         images = []
-        #rho = self.cell[..., 0] * (~ self.solid_cell)
+        
         rho = self.cell[..., 0]
         rho_image = torch.sum(rho, dim=0)
         rho_image /= torch.max(rho_image)
         rho_image = rho_image.detach().cpu().numpy()
         images.append(rho_image)
 
-        #p = self.cell[..., 4] * (~ self.solid_cell)
         p = self.cell[..., 4]
-        p_image = torch.sum(p, dim=0)
-        p_image /= torch.max(p_image)
-        p_image = p_image.detach().cpu().numpy()
-        images.append(p_image)
+        grad_p = gradient_scalar_field(p, self.dx, self.dy, self.dz)
+        dpdx = grad_p[0]
+        dpdy = grad_p[1]
+        dpdz = grad_p[2]
+
+        grad_mag = torch.sqrt(dpdx**2 + dpdy**2 + dpdz**2)
+        grad_mag_image = torch.sum(grad_mag, dim=0)
+        grad_mag_image /= torch.max(grad_mag_image)
+        grad_mag_image = grad_mag_image.detach().cpu().numpy()
+        images.append(grad_mag_image)
 
         for visualizer in self.visualizers:
             images.append(visualizer.get_image())

@@ -172,7 +172,7 @@ class LinesOnVolume(Visualizer):
             pts_list,
             isClosed=False,
             color=(255, 255, 255),
-            thickness=1,
+            thickness=7,
             lineType=cv2.LINE_AA,
         )
 
@@ -321,34 +321,4 @@ def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_d
 
     circle_points_3d = circle_points_3d.unsqueeze(1)  # (NUM_POLYLINE, 1, 4)
     polylines = circle_points_3d.repeat(1, num_points, 1)  # (NUM_POLYLINE, NUM_POINTS, 4)
-    return polylines
-
-def create_random_circle_points_v2(radius, num_polylines, num_points, x_domain, y_domain, device):
-    center_x = (x_domain[0] + x_domain[1]) / 2
-    center_y = (y_domain[0] + y_domain[1]) / 2
-
-    # random angle
-    u = torch.rand(num_polylines, device=device)
-    theta = 2 * torch.pi * u
-
-    # endpoints on circle (in xy plane)
-    x_end = center_x + radius * torch.cos(theta)
-    y_end = center_y + radius * torch.sin(theta)
-    z_end = torch.zeros_like(x_end)
-
-    # homogeneous w (keep 1)
-    w = torch.ones((num_polylines,), device=device)
-
-    # (L, 4) endpoints
-    end = torch.stack([x_end, y_end, z_end, w], dim=1)
-
-    # start point (0,0,0,1)
-    start = torch.tensor([center_x, center_y, 0.0, 1.0], device=device).view(1, 4).repeat(num_polylines, 1)
-
-    # interpolation parameters t in [0,1], (P,)
-    t = torch.linspace(0.0, 1.0, steps=num_points, device=device).view(1, num_points, 1)  # (1,P,1)
-
-    # make polylines: (L,P,4)
-    polylines = start.unsqueeze(1) * (1 - t) + end.unsqueeze(1) * t
-
     return polylines

@@ -92,16 +92,12 @@ def sweep(CELL, ds, dt, reconstruction_method, riemann_solver, boundary_function
     CELL = boundary_function(CELL, normal=normal)
 
     # 5) apply solid cell
-
-    CELL[solid_cell] = 0
+    if(solid_cell is not None):
+        CELL[solid_cell] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1e-6], device=CELL.device, dtype=CELL.dtype)
 
     return CELL
 
 def cal_dt_split(CELL, cfl_coefficient, dx, dy, dz, GAMMA, solid_cell=None):
-    """
-    Calculate time step using CFL condition.
-    solid_cell=True 인 영역은 dt 계산에서 제외.
-    """
 
     rho = CELL[..., 0]
     u   = CELL[..., 1]
@@ -109,33 +105,40 @@ def cal_dt_split(CELL, cfl_coefficient, dx, dy, dz, GAMMA, solid_cell=None):
     w   = CELL[..., 3]
     p   = CELL[..., 4]
 
-    a = torch.sqrt(GAMMA * p / rho)  # sound speed
+    # --- sound speed ---
+    a = torch.sqrt(GAMMA * p / rho)
 
     if solid_cell is not None:
         fluid_mask = ~solid_cell
 
-        # fluid 셀만 추출
+        if fluid_mask.sum() == 0:
+            raise RuntimeError("All cells are solid. Cannot compute dt.")
+
         u_eff = (u.abs() + a)[fluid_mask]
         v_eff = (v.abs() + a)[fluid_mask]
         w_eff = (w.abs() + a)[fluid_mask]
 
-        # 만약 전부 solid면 방어 코드
-        if u_eff.numel() == 0:
-            raise RuntimeError("All cells are solid. Cannot compute dt.")
-
         u_max = u_eff.max()
         v_max = v_eff.max()
         w_max = w_eff.max()
-    else:
-        u_max = torch.max(u.abs() + a)
-        v_max = torch.max(v.abs() + a)
-        w_max = torch.max(w.abs() + a)
 
+    else:
+        u_eff = u.abs() + a
+        v_eff = v.abs() + a
+        w_eff = w.abs() + a
+
+        u_max = torch.max(u_eff)
+        v_max = torch.max(v_eff)
+        w_max = torch.max(w_eff)
+
+    # --- dt 계산 ---
     dt_x = cfl_coefficient * dx / u_max
     dt_y = cfl_coefficient * dy / v_max
     dt_z = cfl_coefficient * dz / w_max
 
-    return torch.min(torch.min(dt_x, dt_y), dt_z)
+    dt = torch.min(torch.min(dt_x, dt_y), dt_z)
+
+    return dt
 
 def strang_update(CELL, cfl_coefficient, dx, dy, dz, reconstruction_method, riemann_solver, boundary_function, GAMMA, dimension=2, solid_cell = None):
     """

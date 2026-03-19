@@ -137,6 +137,51 @@ def generate_multiband_smooth_noise_fft(
 
     return torch.from_numpy(noise).to(device)
 
+def gradient_scalar_field(p, dx, dy, dz):
+    """
+    Compute ∇p of a scalar field using finite differences.
+
+    Parameters
+    ----------
+    p : torch.Tensor
+        Scalar field with shape (Nz, Ny, Nx)
+    dx, dy, dz : float
+        Grid spacing
+
+    Returns
+    -------
+    grad_p : torch.Tensor
+        Gradient field with shape (3, Nz, Ny, Nx)
+        grad_p[0] = ∂p/∂x
+        grad_p[1] = ∂p/∂y
+        grad_p[2] = ∂p/∂z
+    """
+
+    Nz, Ny, Nx = p.shape
+
+    dpdx = torch.zeros_like(p)
+    dpdy = torch.zeros_like(p)
+    dpdz = torch.zeros_like(p)
+
+    # central difference (interior)
+    dpdx[..., 1:-1] = (p[..., 2:] - p[..., :-2]) / (2 * dx)
+    dpdy[:, 1:-1, :] = (p[:, 2:, :] - p[:, :-2, :]) / (2 * dy)
+    dpdz[1:-1, :, :] = (p[2:, :, :] - p[:-2, :, :]) / (2 * dz)
+
+    # forward/backward difference (boundaries)
+    dpdx[..., 0]  = (p[..., 1] - p[..., 0]) / dx
+    dpdx[..., -1] = (p[..., -1] - p[..., -2]) / dx
+
+    dpdy[:, 0, :]  = (p[:, 1, :] - p[:, 0, :]) / dy
+    dpdy[:, -1, :] = (p[:, -1, :] - p[:, -2, :]) / dy
+
+    dpdz[0, :, :]  = (p[1, :, :] - p[0, :, :]) / dz
+    dpdz[-1, :, :] = (p[-1, :, :] - p[-2, :, :]) / dz
+
+    grad_p = torch.stack([dpdx, dpdy, dpdz], dim=0)
+
+    return grad_p
+
 def create_explosion_initial_condition(
         nx,
         ny,
