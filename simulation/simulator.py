@@ -1,5 +1,5 @@
 import torch
-from CFD import gradient_scalar_field
+from .util import volume_render_y
 
 class Simulator:
 
@@ -81,23 +81,41 @@ class Simulator:
     def get_images(self):
         images = []
         
-        rho = self.cell[..., 0]
-        rho_image = torch.sum(rho, dim=0)
-        rho_image /= torch.max(rho_image)
-        rho_image = rho_image.detach().cpu().numpy()
-        images.append(rho_image)
+        #Don't visualize ghost cell
+        rho = self.cell[2:-2, 2:-2, 2:-2, 0]
+        rho_image, _ = volume_render_y(
+                        rho,
+                        dy=self.dy,
+                        density_scale=6.0,
+                        grad_scale=3.0,
+                        tone_mapper="log1p",
+                        tone_param=12.0,
+                        use_gradient=False,
+                        density_weight=1.0,
+                        grad_weight=0.4,
+                        percentile_clip=(0.01, 0.995),
+                        white_background=True,
+                    )
+        
+        images.append(rho_image.cpu().numpy())
+        
 
-        p = self.cell[..., 4]
-        grad_p = gradient_scalar_field(p, self.dx, self.dy, self.dz)
-        dpdx = grad_p[0]
-        dpdy = grad_p[1]
-        dpdz = grad_p[2]
-
-        grad_mag = torch.sqrt(dpdx**2 + dpdy**2 + dpdz**2)
-        grad_mag_image = torch.sum(grad_mag, dim=0)
-        grad_mag_image /= torch.max(grad_mag_image)
-        grad_mag_image = grad_mag_image.detach().cpu().numpy()
-        images.append(grad_mag_image)
+        #Don't visualize ghost cell
+        p = self.cell[2:-2, 2:-2, 2:-2, 4]
+        p_image, _ = volume_render_y(
+                        p,
+                        dy=self.dy,
+                        density_scale=6.0,
+                        grad_scale=3.0,
+                        tone_mapper="log1p",
+                        tone_param=12.0,
+                        use_gradient=True,
+                        density_weight=1.0,
+                        grad_weight=0.4,
+                        percentile_clip=(0.01, 0.995),
+                        white_background=False,
+                    )
+        images.append(p_image.cpu().numpy())
 
         for visualizer in self.visualizers:
             images.append(visualizer.get_image())
