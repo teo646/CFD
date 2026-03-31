@@ -173,4 +173,4 @@ def strang_update(CELL, cfl_coefficient, dx, dy, dz, reconstruction_method, riem
     else:
         raise ValueError(f"dimension must be '2d' or '3d', got {dimension!r}")
 
-    return CELL, dt
+    return CELL, dt.item()

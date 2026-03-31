@@ -237,11 +237,13 @@ class LinesOnVolume(Visualizer):
         self.lines = self.lines @ M.T
 
 
-def create_uniform_circle_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):de
-def create_uniform_sphere_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):
-    center_x = (x_domain[0] + x_domain[1]) / 2
-    center_y = (y_domain[0] + y_domain[1]) / 2
-    center_z = (z_domain[0] + z_domain[1]) / 2
+def create_uniform_sphere_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, center = None, device = None):
+    if(center is None):
+        center_x = (x_domain[0] + x_domain[1]) / 2
+        center_y = (y_domain[0] + y_domain[1]) / 2
+        center_z = (z_domain[0] + z_domain[1]) / 2
+    else:
+        center_x, center_y, center_z = center
 
     # 구면 좌표계를 사용하여 구 표면의 점들 생성
     # 균등하게 분포된 점들을 생성하기 위해 균등 격자 사용
@@ -266,6 +268,12 @@ def create_uniform_sphere_points(radius, num_polylines, num_points, x_domain, y_
     y = radius * torch.sin(phi_flat) * torch.sin(theta_flat) + center_y
     z = radius * torch.cos(phi_flat) + center_z
 
+    positive_mask = x > 0 & y > 0 & z > 0
+
+    x = x[positive_mask]
+    y = y[positive_mask]
+    z = z[positive_mask]
+
     # (NUM_POLYLINE, 3) 형태로 결합
     sphere_points = torch.stack([x, y, z], dim=1)  # (NUM_POLYLINE, 3)
 
@@ -279,10 +287,13 @@ def create_uniform_sphere_points(radius, num_polylines, num_points, x_domain, y_
     polylines = sphere_points_3d.repeat(1, num_points, 1)  # (NUM_POLYLINE, NUM_POINTS, 4)
     return polylines
 
-def create_random_sphere_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):
-    center_x = (x_domain[0] + x_domain[1]) / 2
-    center_y = (y_domain[0] + y_domain[1]) / 2
-    center_z = (z_domain[0] + z_domain[1]) / 2
+def create_random_sphere_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, center = None, device = None):
+    if(center is None):
+        center_x = (x_domain[0] + x_domain[1]) / 2
+        center_y = (y_domain[0] + y_domain[1]) / 2
+        center_z = (z_domain[0] + z_domain[1]) / 2
+    else:
+        center_x, center_y, center_z = center
 
     # u, v ~ Uniform(0, 1)
     u = torch.rand(num_polylines, device=device)
@@ -296,16 +307,27 @@ def create_random_sphere_points(radius, num_polylines, num_points, x_domain, y_d
     z = center_z + radius * torch.cos(phi)
     w = torch.ones((num_polylines), device=device)
 
+    positive_mask = (x > x_domain[0]) & (y > y_domain[0]) & (z > z_domain[0])\
+                    & (x < x_domain[1]) & (y < y_domain[1]) & (z < z_domain[1])
+
+    x = x[positive_mask]
+    y = y[positive_mask]
+    z = z[positive_mask]
+    w = w[positive_mask]
+
     sphere_points_3d = torch.stack([x, y, z, w], dim=1) # (NUM_POLYLINE, 4)
 
     sphere_points_3d = sphere_points_3d.unsqueeze(1)  # (NUM_POLYLINE, 1, 4)
     polylines = sphere_points_3d.repeat(1, num_points, 1)  # (NUM_POLYLINE, NUM_POINTS, 4)
     return polylines
 
-def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, device):
-    center_x = (x_domain[0] + x_domain[1]) / 2
-    center_y = (y_domain[0] + y_domain[1]) / 2
-    center_z = (z_domain[0] + z_domain[1]) / 2
+def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, center = None, device = None):
+    if(center is None):
+        center_x = (x_domain[0] + x_domain[1]) / 2
+        center_y = (y_domain[0] + y_domain[1]) / 2
+        center_z = (z_domain[0] + z_domain[1]) / 2
+    else:
+        center_x, center_y, center_z = center
 
     # u, v ~ Uniform(0, 1)
     u = torch.rand(num_polylines, device=device)
@@ -316,6 +338,14 @@ def create_random_circle_points(radius, num_polylines, num_points, x_domain, y_d
     y = center_y + radius * torch.sin(theta)
     z = torch.full_like(x, center_z)
     w = torch.ones((num_polylines), device=device)
+
+    positive_mask = x > 0 & y > 0 & z > 0
+
+    x = x[positive_mask]
+    y = y[positive_mask]
+    z = z[positive_mask]
+    w = w[positive_mask]
+    
 
     circle_points_3d = torch.stack([x, y, z, w], dim=1) # (NUM_POLYLINE, 4)
 

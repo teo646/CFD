@@ -83,38 +83,15 @@ class Simulator:
         
         #Don't visualize ghost cell
         rho = self.cell[2:-2, 2:-2, 2:-2, 0]
-        rho_image, _ = volume_render_y(
-                        rho,
-                        dy=self.dy,
-                        density_scale=6.0,
-                        grad_scale=3.0,
-                        tone_mapper="log1p",
-                        tone_param=12.0,
-                        use_gradient=False,
-                        density_weight=1.0,
-                        grad_weight=0.4,
-                        percentile_clip=(0.01, 0.995),
-                        white_background=True,
-                    )
-        
+        rho_image = torch.sum(rho, dim = 0)
+        rho_image /= rho_image.max()
         images.append(rho_image.cpu().numpy())
         
 
         #Don't visualize ghost cell
         p = self.cell[2:-2, 2:-2, 2:-2, 4]
-        p_image, _ = volume_render_y(
-                        p,
-                        dy=self.dy,
-                        density_scale=6.0,
-                        grad_scale=3.0,
-                        tone_mapper="log1p",
-                        tone_param=12.0,
-                        use_gradient=True,
-                        density_weight=1.0,
-                        grad_weight=0.4,
-                        percentile_clip=(0.01, 0.995),
-                        white_background=False,
-                    )
+        p_image = torch.sum(p, dim = 0)
+        p_image /= p_image.max()
         images.append(p_image.cpu().numpy())
 
         for visualizer in self.visualizers:

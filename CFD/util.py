@@ -201,3 +201,36 @@ def create_explosion_initial_condition(
     CELL[..., 4] = torch.clamp(CELL[..., 4], min=1e-10)
 
     return CELL
+
+def create_sphere_mask(
+        RESOLUTION,
+        x_domain,
+        y_domain,
+        z_domain,
+        radius,
+        center = None,
+        device=None
+    ):
+
+    nz, ny, nx = RESOLUTION
+    
+    CELL = torch.zeros(RESOLUTION, device=device)
+
+    if center is None:
+        cx, cy, cz = (0, 0, 0)
+    else:
+        cx, cy, cz = center
+    # 각 셀의 중심 좌표 계산 (ghost cell 제외한 실제 셀만)
+    x_coords = torch.linspace(x_domain[0], x_domain[1], nx, device=device)
+    y_coords = torch.linspace(y_domain[0], y_domain[1], ny, device=device)
+    z_coords = torch.linspace(z_domain[0], z_domain[1], nz, device=device)
+    Z, Y, X = torch.meshgrid(z_coords, y_coords, x_coords, indexing='ij')
+
+    # 중심으로부터의 거리 계산
+    if(nz == 1):
+        distances2 = (X - cx)**2 + (Y - cy)**2
+    else:
+        distances2 = (X - cx)**2 + (Y - cy)**2 + (Z - cz)**2
+    # === Smooth Gaussian Profile ===
+    # exp(-r²/(2σ²)) 형태
+    return distances2 < radius ** 2    

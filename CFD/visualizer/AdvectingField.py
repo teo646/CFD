@@ -2,22 +2,22 @@ import torch
 import torch.nn.functional as F
 from .visualizer import Visualizer
 
-class Dye(Visualizer):
-    def __init__(self, dye_field: torch.Tensor):
-        self.dye_field = dye_field
-        device = dye_field.device
-        dtype = dye_field.dtype
+class AdvectingField(Visualizer):
+    def __init__(self, field: torch.Tensor):
+        self.field = field
+        device = field.device
+        dtype = field.dtype
 
         # indices: (nz, ny, nx, 3) with (z, y, x) in last dim
         coord_dtype = torch.float32  # 좌표는 fp32 권장
-        z = torch.arange(dye_field.shape[0], device=device, dtype=coord_dtype)
-        y = torch.arange(dye_field.shape[1], device=device, dtype=coord_dtype)
-        x = torch.arange(dye_field.shape[2], device=device, dtype=coord_dtype)
+        z = torch.arange(field.shape[0], device=device, dtype=coord_dtype)
+        y = torch.arange(field.shape[1], device=device, dtype=coord_dtype)
+        x = torch.arange(field.shape[2], device=device, dtype=coord_dtype)
         Z, Y, X = torch.meshgrid(z, y, x, indexing='ij')
         self.indices = torch.stack([Z, Y, X], dim=-1)  # fp32
 
     @torch.no_grad()
-    def advect_dye_field(
+    def advect_field(
         self,
         velocity: torch.Tensor,   # (nz, ny, nx, 3) with (u, v, w) = (x,y,z) components
         dt: float,
@@ -27,7 +27,7 @@ class Dye(Visualizer):
         filter_epsilon=1e-2,
         mode="bilinear",
     ):
-        nz, ny, nx = self.dye_field.shape
+        nz, ny, nx = self.field.shape
 
         # indices components (z,y,x)
         X = self.indices[..., 2]; Y = self.indices[..., 1]; Z = self.indices[..., 0]
@@ -51,7 +51,7 @@ class Dye(Visualizer):
 
         grid = torch.stack([x_norm, y_norm, z_norm], dim=-1).unsqueeze(0)  # fp32
 
-        field_in = self.dye_field.unsqueeze(0).unsqueeze(0)
+        field_in = self.field.unsqueeze(0).unsqueeze(0)
         advected = F.grid_sample(field_in, grid.to(field_in.dtype),
                                 align_corners=True, mode=mode, padding_mode="border"
         ).squeeze(0).squeeze(0)
@@ -59,14 +59,14 @@ class Dye(Visualizer):
         # dt-의존 필터로 바꾸고 싶으면:
         # eps = torch.exp(torch.tensor(-dt/tau, device=advected.device, dtype=advected.dtype))
         # self.dye_field = advected * (1 - eps) + self.dye_field * eps
-        self.dye_field = advected * (1 - filter_epsilon) + self.dye_field * filter_epsilon
+        self.field = advected * (1 - filter_epsilon) + self.field * filter_epsilon
 
     def update(self, cell, dt, dx, dy, dz):
         # cell[..., 1:4] assumed (u,v,w) = (x,y,z)
-        self.advect_dye_field(cell[..., 1:4], dt, dx, dy, dz)
+        self.advect_field(cell[..., 1:4], dt, dx, dy, dz)
 
     def get_image(self):
-        image = torch.sum(self.dye_field, dim=0)
+        image = torch.sum(self.field, dim=0)
         m = image.max().clamp_min(1e-12)
         image = (image / m).detach().cpu().numpy()
         return image
