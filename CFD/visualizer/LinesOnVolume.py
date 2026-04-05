@@ -5,12 +5,15 @@ import cv2
 import numpy as np
 
 class LinesOnVolume(Visualizer):
-    def __init__(self, x_resolution, y_resolution, lines, max_length=1):
+    def __init__(self, x_resolution, y_resolution, lines, x_domain, y_domain, z_domain, max_length=1):
         self.x_resolution = x_resolution
         self.y_resolution = y_resolution
         self.lines = lines
         self.max_length = max_length
         self.device = lines.device
+        self.x_domain = x_domain
+        self.y_domain = y_domain
+        self.z_domain = z_domain
 
     @torch.no_grad()
     def redistribute_points(self):
@@ -88,10 +91,13 @@ class LinesOnVolume(Visualizer):
         y = self.lines[..., 1]
         z = self.lines[..., 2]
 
-        # 물리 좌표를 grid index로 변환
-        x_idx = x / dx
-        y_idx = y / dy
-        z_idx = z / dz
+        x_min, x_max = self.x_domain
+        y_min, y_max = self.y_domain
+        z_min, z_max = self.z_domain
+        
+        x_idx = (x - x_min) / dx
+        y_idx = (y - y_min) / dy
+        z_idx = (z - z_min) / dz
 
         # periodic index 적용
         x0 = torch.floor(x_idx).long() % nx
@@ -148,9 +154,14 @@ class LinesOnVolume(Visualizer):
         H = int(self.y_resolution * scale)
         W = int(self.x_resolution * scale)
 
+        x_min, x_max = self.x_domain
+        y_min, y_max = self.y_domain
+        
+        px = (self.lines[:, :, 0] - x_min) / (x_max - x_min) * (W - 1)
+        py = (self.lines[:, :, 1] - y_min) / (y_max - y_min) * (H - 1)
         # (L, P, 2) in pixel coords (x, y)
         projected_lines = torch.stack(
-            [self.lines[:, :, 0] * W, self.lines[:, :, 1] * H],
+            [px, py],
             dim=-1
         ).detach().cpu()
 

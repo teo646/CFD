@@ -81,7 +81,7 @@ class RadiativeTransfer(Visualizer):
         self.tmp_for_transfer[:-1, :, :, 5] += input_v * wt_z[:-1, :, :]
         self.tmp_for_transfer[:-1, :, :, :4] += (input_v * ws_z[:-1, :, :]).unsqueeze(-1)
 
-        self.image += self.radiative_cell[0, :, :, 5]
+        self.image += self.radiative_cell[-1, :, :, 4]
         self.radiative_cell.copy_(self.tmp_for_transfer)
 
     @torch.no_grad()
@@ -102,7 +102,8 @@ class RadiativeTransfer(Visualizer):
         T = p / (rho_safe * self.R_star)
 
         # Stefan-Boltzmann-like emission
-        emission = (T.clamp_min(0.0) ** 4) * (T > self.T_ref)
+        cell_volume = self.dx * self.dy * self.dz
+        emission = (T.clamp_min(0.0) ** 4) * cell_volume * (T > self.T_ref)
         source = emission.unsqueeze(-1).expand(-1, -1, -1, 6)
         initial_max = torch.max(source)
 
