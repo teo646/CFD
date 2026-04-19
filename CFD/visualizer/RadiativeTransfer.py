@@ -103,7 +103,8 @@ class RadiativeTransfer(Visualizer):
 
         # Stefan-Boltzmann-like emission
         cell_volume = self.dx * self.dy * self.dz
-        emission = (T.clamp_min(0.0) ** 4) * cell_volume * (T > self.T_ref)
+        emission = (T.clamp_min(0.0)) * cell_volume
+        #emission = (T > self.T_ref)
         source = emission.unsqueeze(-1).expand(-1, -1, -1, 6)
         initial_max = torch.max(source)
 

@@ -103,7 +103,7 @@ def create_boundary_band_solid_mask(
     # 물리 반지름 r 주변의 얇은 쉘(밴드)
     boundary_band = (dist2_phys > (r - t) ** 2) & (dist2_phys < (r + t) ** 2)
 
-    noise = generate_multiband_smooth_noise_fft((Nz, Ny, Nx), [r_k0], [1.0], device=device)
+    noise = generate_multiband_smooth_noise_fft(shape, [r_k0], [1.0], dx=dx, dy=dy, dz=dz, device=device)
 
     # 숫자가 작을 수록 구멍이 커짐.
     noise_mask = noise > noise_threshold

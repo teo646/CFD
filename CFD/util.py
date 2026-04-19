@@ -75,67 +75,61 @@ def W_to_F(W, GAMMA, normal='x'):
 
 def generate_multiband_smooth_noise_fft(
     shape,
-    r_k0_list,   # e.g. [1/8, 1/4, 1/2]  (ratio to "cells" scale)
-    weight_list, # e.g. [1.0, 0.7, 0.3]
+    r_k0_list,   # 비례 계수
+    weight_list, # 밴드별 가중치
+    dx=1,
+    dy=1,
+    dz=1,  # 비등방 격자 간격 추가
     device=None,
     eps=1e-12,
 ):
     """
-    Multi-band smooth noise using FFT with multiple Gaussian low-pass envelopes.
-
-    Parameters
-    ----------
-    shape : (nz, ny, nx)
-        Grid resolution.
-    r_k0_list : list[float]
-        Each r_k0 is a ratio to the average cell count:
-            k0_i = r_k0_i * ((nx + ny + nz) / 3)
-        Using ratios makes it behave similarly across resolutions.
-        Larger r_k0 -> smoother (stronger low-pass), smaller r_k0 -> rougher.
-    weight_list : list[float]
-        Mixing weights per band. Same length as r_k0_list.
-    device : torch.device or str or None
-        Target device for returned tensor.
-    eps : float
-        Numerical stability for std.
-
-    Returns
-    -------
-    torch.Tensor
-        Noise field of shape (nz, ny, nx), standardized to unit std.
+    비등방 격자(Anisotropic Grid)를 지원하는 FFT 기반 멀티밴드 노이즈 생성.
     """
     if len(r_k0_list) != len(weight_list):
         raise ValueError("r_k0_list and weight_list must have the same length.")
 
     nz, ny, nx = shape
-    if nx <= 0 or ny <= 0 or nz <= 0:
-        raise ValueError("shape must be positive in all dims.")
 
-    # Frequency grids (cycles per sample)
-    kx = np.fft.fftfreq(nx)
-    ky = np.fft.fftfreq(ny)
-    kz = np.fft.fftfreq(nz)
+    # 1. 물리적 주파수 그리드 생성 (Physical frequencies: cycles per unit length)
+    # d 인자를 주어 각 축의 물리적 간격을 반영합니다.
+    kx = np.fft.fftfreq(nx, d=dx)
+    ky = np.fft.fftfreq(ny, d=dy)
+    kz = np.fft.fftfreq(nz, d=dz)
+    
     KZ, KY, KX = np.meshgrid(kz, ky, kx, indexing='ij')
+    
+    # K2는 물리적 주파수의 제곱 합 (1/length^2 단위)
     K2 = KX**2 + KY**2 + KZ**2
 
-    # Convert ratios -> k0 in "cell-count" scale (resolution-invariant-ish)
-    mean_n = (nx + ny + nz) / 3.0
-    k0_list = [float(r) * mean_n for r in r_k0_list]
+    # 2. 물리적 차단 길이(Cut-off length) 설정
+    # 기존 r_k0가 "평균 셀 개수"에 비례했다면, 
+    # 이제는 "평균 물리적 도메인 크기"에 비례하도록 설정하여 일관성을 유지합니다.
+    Lx, Ly, Lz = nx * dx, ny * dy, nz * dz
+    mean_L = (Lx + Ly + Lz) / 3.0
+    
+    # k0_phys는 물리적 길이(length) 단위를 가집니다.
+    k0_list = [float(r) * mean_L for r in r_k0_list]
 
     spectrum = np.zeros((nz, ny, nx), dtype=np.complex128)
 
-    for w, k0 in zip(weight_list, k0_list):
-        # Complex white noise
+    for w, k0_phys in zip(weight_list, k0_list):
+        # 복소 화이트 노이즈 생성
         band = np.random.randn(nz, ny, nx) + 1j * np.random.randn(nz, ny, nx)
-        # Gaussian low-pass envelope
-        band *= np.exp(-K2 * (k0**2))
+        
+        # 가우시안 저역 통과 필터 (등방성 유지)
+        # exp(-K_phys^2 * k0_phys^2) 형태가 되어 물리 공간에서 일정한 반경을 가짐
+        band *= np.exp(-K2 * (k0_phys**2))
         spectrum += float(w) * band
 
+    # 역푸리에 변환으로 실공간 노이즈 생성
     noise = np.fft.ifftn(spectrum).real
+    
+    # 표준화 (Unit Standard Deviation)
     std = np.std(noise)
     noise = noise / (std + eps)
 
-    return torch.from_numpy(noise).to(device)
+    return torch.from_numpy(noise.astype(np.float32)).to(device)
 
 def create_explosion_initial_condition(
         RESOLUTION,
