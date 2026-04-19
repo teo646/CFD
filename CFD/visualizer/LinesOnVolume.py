@@ -10,7 +10,7 @@ import cv2
 from shapely.geometry import Polygon, MultiPolygon
 
 class LinesOnVolume(Visualizer):
-    def __init__(self, x_resolution, y_resolution, lines, x_domain, y_domain, z_domain, max_length=1):
+    def __init__(self, x_resolution, y_resolution, lines, x_domain, y_domain, z_domain, max_length=1, anchor = True):
         self.x_resolution = x_resolution
         self.y_resolution = y_resolution
         self.lines = lines
@@ -19,6 +19,8 @@ class LinesOnVolume(Visualizer):
         self.x_domain = x_domain
         self.y_domain = y_domain
         self.z_domain = z_domain
+
+        self.anchor = anchor
 
     @torch.no_grad()
     def redistribute_points(self):
@@ -143,9 +145,14 @@ class LinesOnVolume(Visualizer):
         w = trilerp(velocity[..., 2])
 
         # 좌표 업데이트 (물리 좌표로)
-        self.lines[:, 1:, 0] = (x + u * dt)[:, 1:]
-        self.lines[:, 1:, 1] = (y + v * dt)[:, 1:]
-        self.lines[:, 1:, 2] = (z + w * dt)[:, 1:]
+        if(self.anchor):
+            self.lines[:, 1:, 0] = (x + u * dt)[:, 1:]
+            self.lines[:, 1:, 1] = (y + v * dt)[:, 1:]
+            self.lines[:, 1:, 2] = (z + w * dt)[:, 1:]
+        else:
+            self.lines[..., 0] = (x + u * dt)
+            self.lines[..., 1] = (y + v * dt)
+            self.lines[..., 2] = (z + w * dt)
 
         self.redistribute_points()
 
@@ -251,6 +258,12 @@ class LinesOnVolume(Visualizer):
 
         # row vector이므로 transpose
         self.lines = self.lines @ M.T
+
+    def add_lines(self, new_lines):
+        # if the number of points doesn't match.
+        if(not new_lines.shape[1] == self.lines.shape[1]):
+            raise IndexError("The number of points should match.")
+        self.lines = torch.cat([self.lines, new_lines.to(self.device)], dim=0)
 
 
 def create_uniform_sphere_points(radius, num_polylines, num_points, x_domain, y_domain, z_domain, center=None, device=None):
@@ -639,7 +652,7 @@ def get_random_normal_from_voxel(voxel, center, x_domain, y_domain, z_domain, de
 # normal, pos = get_random_normal_from_boundary(updated_boundary_band, x_domain, y_domain, z_domain)
 
 def create_boundary_band_with_contours(
-    shape, radius, num_holes, hole_range, polyline_dist, num_points, 
+    shape, radius, num_holes, hole_range, polyline_dist, 
     x_domain, y_domain, z_domain, center=None, 
     device='cuda', contour_offsets = [0.1]
 ):
