@@ -190,14 +190,18 @@ class LinesOnVolume(Visualizer):
         # OpenCV polylines expects list of (P,1,2)
         pts_list = [p.reshape(-1, 1, 2) for p in pts]
 
-        cv2.polylines(
-            img,
-            pts_list,
-            isClosed=False,
-            color=(255, 255, 255),
-            thickness=7,
-            lineType=cv2.LINE_AA,
-        )
+        if(len(pts_list) == 1):
+            cv2.circle(img, tuple(pts_list[0][0]), radius=1, color=(255, 255, 255), thickness=-1)
+        else:
+
+            cv2.polylines(
+                img,
+                pts_list,
+                isClosed=False,
+                color=(255, 255, 255),
+                thickness=7,
+                lineType=cv2.LINE_AA,
+            )
 
         if scale != 1:
             img = cv2.resize(img, None, fx=1/scale, fy=1/scale)
@@ -498,13 +502,17 @@ def offset_contour_2d(points, d, device='cpu'):
         )
 
     return polygons
+
+def resize_contour_2d(points, ratio, device='cpu'):
+    points[:, :2] *= ratio 
+
+    return [points]
     
-def map_points_to_sphere(points, center, radius, normal=None, offset=0, device='cpu'):
+def map_points_to_sphere(points, center, radius, normal=None, ratio=1, device='cpu'):
     points = torch.as_tensor(points, dtype=torch.float32, device=device)
     center = torch.as_tensor(center, dtype=torch.float32, device=device)
 
-    # 🔥 이제 리스트로 받음
-    contours = offset_contour_2d(points, offset, device=device)
+    contours = resize_contour_2d(points, ratio, device=device)
 
     if len(contours) == 0:
         return []
@@ -654,7 +662,7 @@ def get_random_normal_from_voxel(voxel, center, x_domain, y_domain, z_domain, de
 def create_boundary_band_with_contours(
     shape, radius, num_holes, hole_range, polyline_dist, 
     x_domain, y_domain, z_domain, center=None, 
-    device='cuda', contour_offsets = [0.1]
+    device='cuda', contour_ratios = [1]
 ):
     if(center is None):
         center = ((x_domain[1] + x_domain[0]) / 2, (y_domain[1] + y_domain[0]) / 2, (z_domain[1] + z_domain[0]) / 2)
@@ -692,11 +700,11 @@ def create_boundary_band_with_contours(
         
         updated_boundary_band = updated_boundary_band & ~voxel_hole
 
-        for contour_offset in contour_offsets:
+        for contour_ratio in contour_ratios:
             
             contour_pts3ds = map_points_to_sphere(
                 contour, center=center, radius=radius,
-                offset=contour_offset, device=device, normal=normal
+                ratio=contour_ratio, device=device, normal=normal
             )
 
             for contour_pts3d in contour_pts3ds:
